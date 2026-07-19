@@ -216,15 +216,20 @@
     <div id="app" class="app" style="display: none">
       <!-- SIDEBAR -->
       <aside class="sidebar" id="sidebar">
-        <div class="sidebar-header">
-          <div class="sidebar-logo">
-            <span>🌀</span>
-            <span class="sidebar-logo-text">SwaCord</span>
+        <div class="sidebar-header" style="display: flex; justify-content: space-between; align-items: center;">
+          <div>
+            <div class="sidebar-logo">
+              <span>🌀</span>
+              <span class="sidebar-logo-text">SwaCord</span>
+            </div>
+            <div class="connection-badge" id="connectionBadge">
+              <span class="badge-dot"></span>
+              <span class="badge-label">Підключення…</span>
+            </div>
           </div>
-          <div class="connection-badge" id="connectionBadge">
-            <span class="badge-dot"></span>
-            <span class="badge-label">Підключення…</span>
-          </div>
+          <button class="theme-btn" id="themeBtnInner" title="Toggle Theme" style="width: 32px; height: 32px; font-size: 16px;">
+            🌙
+          </button>
         </div>
 
         <div class="sidebar-section">

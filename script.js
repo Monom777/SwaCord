@@ -246,26 +246,28 @@ function initLangSwitcher() {
    THEME SWITCHER
    ══════════════════════════════════════════════════════════ */
 function initThemeSwitcher() {
-  const btn = document.getElementById('themeBtn');
-  if (!btn) return;
+  const btns = document.querySelectorAll('.theme-btn');
+  if (!btns.length) return;
 
   const currentTheme = localStorage.getItem('swacord_theme') || 'dark';
   if (currentTheme === 'light') {
     document.documentElement.setAttribute('data-theme', 'light');
-    btn.textContent = '☀️';
+    btns.forEach(btn => btn.textContent = '☀️');
   }
 
-  btn.addEventListener('click', () => {
-    const isLight = document.documentElement.getAttribute('data-theme') === 'light';
-    if (isLight) {
-      document.documentElement.removeAttribute('data-theme');
-      localStorage.setItem('swacord_theme', 'dark');
-      btn.textContent = '🌙';
-    } else {
-      document.documentElement.setAttribute('data-theme', 'light');
-      localStorage.setItem('swacord_theme', 'light');
-      btn.textContent = '☀️';
-    }
+  btns.forEach(btn => {
+    btn.addEventListener('click', () => {
+      const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+      if (isLight) {
+        document.documentElement.removeAttribute('data-theme');
+        localStorage.setItem('swacord_theme', 'dark');
+        btns.forEach(b => b.textContent = '🌙');
+      } else {
+        document.documentElement.setAttribute('data-theme', 'light');
+        localStorage.setItem('swacord_theme', 'light');
+        btns.forEach(b => b.textContent = '☀️');
+      }
+    });
   });
 }
 
