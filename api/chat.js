@@ -38,8 +38,8 @@ export default async function handler(req, res) {
       // Keep only last 200 items (LTRIM keeps from -200 to -1)
       await redis.ltrim(`room:${room}:chat`, -200, -1);
       
-      // Set expiration for the room chat (e.g. 7 days)
-      await redis.expire(`room:${room}:chat`, 604800);
+      // Set expiration for the room chat to 30 days
+      await redis.expire(`room:${room}:chat`, 2592000);
 
       return res.status(200).json({ success: true });
     }

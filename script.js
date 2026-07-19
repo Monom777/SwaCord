@@ -270,6 +270,54 @@ function initThemeSwitcher() {
 }
 
 /* ══════════════════════════════════════════════════════════
+   SOUND NOTIFICATIONS
+   ══════════════════════════════════════════════════════════ */
+let audioCtx = null;
+function playSound(type) {
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    
+    const now = audioCtx.currentTime;
+    
+    if (type === 'join') {
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(440, now);
+      osc.frequency.exponentialRampToValueAtTime(880, now + 0.1);
+      gain.gain.setValueAtTime(0, now);
+      gain.gain.linearRampToValueAtTime(0.1, now + 0.05);
+      gain.gain.linearRampToValueAtTime(0, now + 0.2);
+      osc.start(now);
+      osc.stop(now + 0.2);
+    } else if (type === 'leave') {
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(880, now);
+      osc.frequency.exponentialRampToValueAtTime(440, now + 0.1);
+      gain.gain.setValueAtTime(0, now);
+      gain.gain.linearRampToValueAtTime(0.1, now + 0.05);
+      gain.gain.linearRampToValueAtTime(0, now + 0.2);
+      osc.start(now);
+      osc.stop(now + 0.2);
+    } else if (type === 'msg') {
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(600, now);
+      gain.gain.setValueAtTime(0, now);
+      gain.gain.linearRampToValueAtTime(0.05, now + 0.02);
+      gain.gain.linearRampToValueAtTime(0, now + 0.15);
+      osc.start(now);
+      osc.stop(now + 0.15);
+    }
+  } catch (e) {
+    console.warn('Audio play failed', e);
+  }
+}
+
+/* ══════════════════════════════════════════════════════════
    CONSTANTS & CONFIG
    ══════════════════════════════════════════════════════════ */
 const AVATARS = [
@@ -291,6 +339,8 @@ const MSG_TYPES = {
   MUTE_FORCE:    'mute_force',
   STOP_SCREEN:   'stop_screen',
   TRANSFER_HOST: 'transfer_host',
+  TYPING:        'typing',
+  FILE:          'file',
 };
 
 /* Banned peer IDs for this session */
@@ -337,6 +387,8 @@ const state = {
   // Chat
   lastMsgAuthor:   null,
   lastMsgTime:     null,
+  typingPeers:     new Set(),
+  typingTimeout:   null,
 
   // Screen quality settings (persisted)
   screenQuality: JSON.parse(localStorage.getItem('swacord_screen_quality') || 'null') || {
@@ -380,10 +432,16 @@ const DOM = {
   messagesWrap:     $('messagesWrap'),
   msgInput:         $('msgInput'),
   btnSend:          $('btnSend'),
+  btnAttachFile:    $('btnAttachFile'),
+  fileInput:        $('fileInput'),
+  btnEmoji:         $('btnEmoji'),
   btnCopyLink:      $('btnCopyLink'),
+  typingIndicator:  $('typingIndicator'),
 
   controlBar:       $('controlBar'),
   roomIdDisplay:    $('roomIdDisplay'),
+  btnMobileMenu:    $('btnMobileMenu'),
+  sidebar:          document.querySelector('.sidebar'),
   btnMic:           $('btnMic'),
   iconMicOn:        $('iconMicOn'),
   iconMicOff:       $('iconMicOff'),
@@ -412,7 +470,56 @@ function init() {
     DOM.nicknameInput.value = savedName;
   }
 
+  renderRoomHistory();
   DOM.nicknameInput?.focus();
+}
+
+function renderRoomHistory() {
+  const container = document.getElementById('roomHistoryContainer');
+  const list = document.getElementById('roomHistoryList');
+  if (!container || !list) return;
+
+  const history = JSON.parse(localStorage.getItem('swacord_rooms') || '[]');
+  if (!history.length) {
+    container.style.display = 'none';
+    return;
+  }
+
+  container.style.display = 'block';
+  list.innerHTML = '';
+
+  history.forEach(room => {
+    const li = document.createElement('li');
+    li.className = 'history-item';
+    
+    const d = new Date(room.date);
+    const dateStr = d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+
+    li.innerHTML = `
+      <div>
+        <div class="history-item-id">${room.id}</div>
+        <div class="history-item-date">${dateStr}</div>
+      </div>
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--text-muted); opacity: 0.6"><polyline points="9 18 15 12 9 6"></polyline></svg>
+    `;
+
+    li.addEventListener('click', () => {
+      // Set to Vercel mode automatically
+      const modeSwitch = document.getElementById('modeSwitch');
+      if (modeSwitch) modeSwitch.checked = true;
+      state.serverMode = true;
+      state.roomId = room.id;
+      
+      const name = DOM.nicknameInput.value.trim() || localStorage.getItem('swacord_name') || 'Guest';
+      state.myName = name;
+      localStorage.setItem('swacord_name', name);
+      
+      showConnecting(t('joiningRoomConn'), t('connectingCloud'));
+      initMedia().then(() => createPeer(null));
+    });
+
+    list.appendChild(li);
+  });
 }
 
 /** Build emoji avatar picker */
@@ -477,6 +584,17 @@ function bindOnboardingEvents() {
     }
   });
 
+  DOM.btnMobileMenu?.addEventListener('click', () => {
+    DOM.sidebar?.classList.toggle('active');
+  });
+
+  // Close sidebar when clicking main area on mobile
+  document.querySelector('.main-area')?.addEventListener('click', () => {
+    if (window.innerWidth <= 768 && DOM.sidebar?.classList.contains('active')) {
+      DOM.sidebar.classList.remove('active');
+    }
+  });
+
   DOM.btnCreate.addEventListener('click', onCreateRoom);
   DOM.btnJoin.addEventListener('click', onJoinRoom);
 }
@@ -491,7 +609,7 @@ async function onCreateRoom() {
   state.serverMode = modeSwitch ? modeSwitch.checked : false;
   
   if (state.serverMode) {
-    state.roomId = 'v_' + Math.random().toString(36).substr(2, 9);
+    state.roomId = 'v_' + Math.random().toString(36).substr(2, 9) + Math.random().toString(36).substr(2, 9);
     state.isHost = true;
   } else {
     state.roomId = null; 
@@ -629,6 +747,14 @@ function createPeer(customId) {
 async function launchApp() {
   if (state.launched) return;
   state.launched = true;
+
+  if (state.serverMode && state.roomId) {
+    let history = JSON.parse(localStorage.getItem('swacord_rooms') || '[]');
+    history = history.filter(h => h.id !== state.roomId);
+    history.unshift({ id: state.roomId, date: Date.now() });
+    if (history.length > 10) history = history.slice(0, 10);
+    localStorage.setItem('swacord_rooms', JSON.stringify(history));
+  }
 
   DOM.overlay.classList.remove('active');
   setTimeout(() => DOM.overlay.style.display = 'none', 400);
@@ -788,6 +914,31 @@ function handleDataMessage(peerId, data) {
     case MSG_TYPES.MUTE_FORCE:    onForceMuted(); break;
     case MSG_TYPES.STOP_SCREEN:   onStopScreenCmd(); break;
     case MSG_TYPES.TRANSFER_HOST: onTransferHost(data); break;
+    case MSG_TYPES.TYPING:
+      if (data.isTyping) state.typingPeers.add(peerId);
+      else state.typingPeers.delete(peerId);
+      renderTypingIndicator();
+      break;
+    case MSG_TYPES.FILE:
+      playSound('msg');
+      appendMessage({
+        authorId:  peerId,
+        authorName: state.peers.get(peerId)?.name || t('unknownUser'),
+        avatar:    state.peers.get(peerId)?.avatar || '❓',
+        isFile:    true,
+        fileName:  data.fileName,
+        fileType:  data.fileType,
+        data:      data.data,
+        time:      data.time || Date.now(),
+        isSelf:    false,
+      });
+      break;
+    case MSG_TYPES.LEAVE:
+      const p = state.peers.get(peerId);
+      if (p) addSystemMessage(p.name, t('leftRoom'));
+      playSound('leave');
+      handlePeerDisconnect(peerId);
+      break;
     case 'server_mode':
       const changed = (state.serverMode !== data.enabled);
       state.serverMode = data.enabled; 
@@ -814,17 +965,17 @@ function onPeerInit(peerId, data) {
   });
   refreshMemberList();
 
-  // Show join message only once per peer (not on every init re-send)
+  // Show join message only once per peer
   if (isFirstTime) {
     addSystemMessage(`${data.avatar} <strong>${escHtml(data.name)}</strong> ${t('joinedRoom')}`);
+    playSound('join');
   }
-  // NOTE: We do NOT send init back here — that caused an infinite ping-pong loop.
-  // Both sides already send init once when the DataChannel opens.
 }
 
 
 function onChatMessage(peerId, data) {
   const peer = state.peers.get(peerId);
+  playSound('msg');
   appendMessage({
     authorId:  peerId,
     authorName: peer?.name || t('unknownUser'),
@@ -966,13 +1117,64 @@ function bindAppEvents() {
   // Send message
   DOM.btnSend.addEventListener('click', sendChatMessage);
   DOM.msgInput.addEventListener('keydown', e => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      sendChatMessage();
-    }
+    if (e.key === 'Enter') sendChatMessage();
+  });
+  DOM.msgInput.addEventListener('input', () => {
+    if (!state.peer || !state.peer.open || state.serverMode) return;
+    broadcastData({ type: MSG_TYPES.TYPING, isTyping: true });
+    if (state.typingTimeout) clearTimeout(state.typingTimeout);
+    state.typingTimeout = setTimeout(() => {
+      broadcastData({ type: MSG_TYPES.TYPING, isTyping: false });
+    }, 2000);
+  });
+  
+  DOM.btnEmoji?.addEventListener('click', () => {
+    DOM.msgInput.value += '😊';
+    DOM.msgInput.focus();
   });
 
-  // Mic toggle
+  DOM.btnAttachFile?.addEventListener('click', () => DOM.fileInput?.click());
+  DOM.fileInput?.addEventListener('change', e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (file.size > 2 * 1024 * 1024) {
+      toast('Файл занадто великий (макс 2 МБ)', 'error');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const base64 = reader.result;
+      const now = Date.now();
+      const msg = {
+        type: MSG_TYPES.FILE,
+        fileName: file.name,
+        fileType: file.type,
+        data: base64,
+        time: now
+      };
+      broadcastData(msg);
+      
+      if (state.serverMode) {
+        postVercelChat({ authorId: state.myId, authorName: state.myName, avatar: state.myAvatar, isFile: true, fileName: file.name, fileType: file.type, data: base64, time: now });
+      } else {
+        saveMsgToHistory({ authorId: state.myId, authorName: state.myName, avatar: state.myAvatar, isFile: true, fileName: file.name, fileType: file.type, data: base64, time: now, isSelf: true });
+      }
+      
+      appendMessage({
+        authorId: state.myId,
+        authorName: state.myName,
+        avatar: state.myAvatar,
+        isFile: true,
+        fileName: file.name,
+        fileType: file.type,
+        data: base64,
+        time: now,
+        isSelf: true
+      });
+    };
+    reader.readAsDataURL(file);
+    e.target.value = ''; // reset
+  });
   DOM.btnMic.addEventListener('click', toggleMic);
 
   // Screen share
@@ -1028,13 +1230,15 @@ function sendChatMessage() {
 
   if (state.serverMode) {
     postVercelChat({ authorId: state.myId, authorName: state.myName, avatar: state.myAvatar, text, time: now });
+  } else {
+    broadcastData({ type: MSG_TYPES.TYPING, isTyping: false });
   }
 
   DOM.msgInput.value = '';
   DOM.msgInput.focus();
 }
 
-function appendMessage({ authorId, authorName, avatar, text, time, isSelf, isHistory }) {
+function appendMessage({ authorId, authorName, avatar, text, time, isSelf, isHistory, isFile, fileName, fileType, data }) {
   // Remove empty state placeholder
   const empty = DOM.messagesWrap.querySelector('.empty-chat');
   if (empty) empty.remove();
@@ -1051,6 +1255,17 @@ function appendMessage({ authorId, authorName, avatar, text, time, isSelf, isHis
   const div = document.createElement('div');
   div.className = 'msg fade-in' + (isContinued ? ' continued' : '') + (isHistory ? ' msg-history' : '');
 
+  let contentHtml = '';
+  if (isFile) {
+    if (fileType && fileType.startsWith('image/')) {
+      contentHtml = `<img src="${data}" alt="${escHtml(fileName)}" class="chat-img" style="max-width: 100%; border-radius: 8px; margin-top: 4px;">`;
+    } else {
+      contentHtml = `<a href="${data}" download="${escHtml(fileName)}" class="chat-file" style="display:inline-block; padding:8px 12px; background:var(--bg-elevated); border:1px solid var(--border); border-radius:8px; text-decoration:none; color:var(--accent-400); margin-top:4px;">📎 ${escHtml(fileName)}</a>`;
+    }
+  } else {
+    contentHtml = linkify(escHtml(text));
+  }
+
   div.innerHTML = `
     <div class="msg-avatar">${avatar}</div>
     <div class="msg-body">
@@ -1058,7 +1273,7 @@ function appendMessage({ authorId, authorName, avatar, text, time, isSelf, isHis
         <span class="msg-author${isSelf ? ' self' : ''}">${escHtml(authorName)}</span>
         <span class="msg-time">${timeStr}</span>
       </div>
-      <div class="msg-text">${linkify(escHtml(text))}</div>
+      <div class="msg-text">${contentHtml}</div>
     </div>
   `;
 
@@ -1081,7 +1296,7 @@ const CHAT_MAX = 200;
 function saveMsgToHistory(msg) {
   try {
     const history = JSON.parse(localStorage.getItem(CHAT_KEY) || '[]');
-    history.push({ authorId: msg.authorId, authorName: msg.authorName, avatar: msg.avatar, text: msg.text, time: msg.time, isSelf: msg.isSelf });
+    history.push({ authorId: msg.authorId, authorName: msg.authorName, avatar: msg.avatar, text: msg.text, time: msg.time, isSelf: msg.isSelf, isFile: msg.isFile, fileName: msg.fileName, fileType: msg.fileType, data: msg.data });
     if (history.length > CHAT_MAX) history.splice(0, history.length - CHAT_MAX);
     localStorage.setItem(CHAT_KEY, JSON.stringify(history));
   } catch(e) { console.warn('Chat save error:', e); }
@@ -1176,6 +1391,25 @@ function renderEmptyChat() {
 
 function scrollToBottom() {
   DOM.messagesWrap.scrollTop = DOM.messagesWrap.scrollHeight;
+}
+
+function renderTypingIndicator() {
+  if (!DOM.typingIndicator) return;
+  if (state.typingPeers.size === 0) {
+    DOM.typingIndicator.innerHTML = '';
+    return;
+  }
+  const names = Array.from(state.typingPeers)
+    .map(id => state.peers.get(id)?.name)
+    .filter(Boolean);
+  
+  if (names.length === 0) return;
+  
+  let text = names[0];
+  if (names.length === 2) text += ` та ${names[1]}`;
+  else if (names.length > 2) text += ` та ще ${names.length - 1} людей`;
+  
+  DOM.typingIndicator.innerHTML = `<span>${text} друкує</span><span class="typing-dots"></span>`;
 }
 
 /* ══════════════════════════════════════════════════════════

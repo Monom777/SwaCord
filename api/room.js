@@ -71,7 +71,7 @@ export default async function handler(req, res) {
       const timestamp = existingJoin || joinedAt || Date.now();
       
       await redis.set(`room:${room}:peer:${peerId}`, timestamp, { ex: HEARTBEAT_TTL_SECONDS });
-      await redis.expire(`room:${room}:peers`, 604800);
+      await redis.expire(`room:${room}:peers`, 2592000);
 
       return res.status(200).json({ success: true, timestamp });
     }
