@@ -283,6 +283,7 @@ const state = {
   roomId:          null,   // host's peer ID
   isHost:          false,
   serverMode:      false,  // whether chat is saved on Vercel
+  launched:        false,
 
   // Profile
   myName:          '',
@@ -405,8 +406,8 @@ function checkRoomInUrl() {
   const params = new URLSearchParams(window.location.search);
   const roomParam = params.get('room');
   if (roomParam) {
-    // Guest: show join button, hide create button and mode switch
     state.roomId = roomParam;
+    state.serverMode = roomParam.startsWith('v_');
     
     // Hide create UI
     const modeSwitch = document.getElementById('modeSwitchContainer');
@@ -448,11 +449,21 @@ async function onCreateRoom() {
   const name = DOM.nicknameInput.value.trim();
   if (!name) return;
   state.myName   = name;
-  state.isHost   = true;
+  
+  const modeSwitch = document.getElementById('modeSwitch');
+  state.serverMode = modeSwitch ? modeSwitch.checked : false;
+  
+  if (state.serverMode) {
+    state.roomId = 'v_' + Math.random().toString(36).substr(2, 9);
+    state.isHost = true;
+  } else {
+    state.roomId = null; 
+    state.isHost = true;
+  }
 
   showConnecting(t('creatingRoom'), t('connectingCloud'));
   await initMedia();
-  createPeer(null); // host: generate random ID
+  createPeer(null); 
 }
 
 async function onJoinRoom() {
@@ -463,7 +474,7 @@ async function onJoinRoom() {
 
   showConnecting(t('joiningRoomConn'), t('connectingCloud'));
   await initMedia();
-  createPeer(null); // guest also gets random ID; will call host after open
+  createPeer(null);
 }
 
 function showConnecting(title, sub) {
@@ -512,17 +523,24 @@ function createPeer(customId) {
     state.myId = peerId;
     console.log('[SwaCord] My PeerID:', peerId);
 
-    if (state.isHost) {
-      // Update URL with room ID
-      state.roomId = peerId;
+    if (state.serverMode) {
       const url = new URL(window.location.href);
-      url.searchParams.set('room', peerId);
+      url.searchParams.set('room', state.roomId);
       window.history.replaceState({}, '', url.toString());
+      
+      startVercelHeartbeat();
       launchApp();
     } else {
-      // Guest connects to host
-      DOM.connectingSub.textContent = t('connectingToHost');
-      connectToHost(state.roomId);
+      if (state.isHost) {
+        state.roomId = peerId;
+        const url = new URL(window.location.href);
+        url.searchParams.set('room', peerId);
+        window.history.replaceState({}, '', url.toString());
+        launchApp();
+      } else {
+        DOM.connectingSub.textContent = t('connectingToHost');
+        connectToPeer(state.roomId);
+      }
     }
   });
 
@@ -560,6 +578,9 @@ function createPeer(customId) {
    HOST: LAUNCH APP
    ══════════════════════════════════════════════════════════ */
 async function launchApp() {
+  if (state.launched) return;
+  state.launched = true;
+
   DOM.overlay.classList.remove('active');
   setTimeout(() => DOM.overlay.style.display = 'none', 400);
 
@@ -587,15 +608,15 @@ async function launchApp() {
 /* ══════════════════════════════════════════════════════════
    GUEST: CONNECT TO HOST
    ══════════════════════════════════════════════════════════ */
-function connectToHost(hostId) {
+function connectToPeer(peerId) {
   // 1. Data connection
-  const dataConn = state.peer.connect(hostId, { reliable: true, serialization: 'json' });
+  const dataConn = state.peer.connect(peerId, { reliable: true, serialization: 'json' });
   setupDataConnection(dataConn);
 
   // 2. Voice call
   if (state.localStream) {
-    const call = state.peer.call(hostId, state.localStream);
-    setupCall(call, hostId);
+    const call = state.peer.call(peerId, state.localStream);
+    setupCall(call, peerId);
   }
 
   dataConn.on('open', () => {
@@ -837,8 +858,17 @@ function modStopScreen(peerId) {
 
 function modTransferHost(peerId) {
   if (!confirm(`Transfer host to ${state.peers.get(peerId)?.name}?`)) return;
-  broadcastData({ type: MSG_TYPES.TRANSFER_HOST, newHostId: peerId });
-  // I become a regular member
+  
+  if (state.serverMode) {
+    fetch('/api/room', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ room: state.roomId, peerId: state.myId, targetPeerId: peerId, action: 'transfer' })
+    });
+  } else {
+    broadcastData({ type: MSG_TYPES.TRANSFER_HOST, newHostId: peerId });
+  }
+
   state.isHost = false;
   renderMyProfile();
   refreshMemberList();
@@ -1364,10 +1394,36 @@ function copyInviteLink() {
 function leaveRoom() {
   if (!confirm(t('leaveConfirm'))) return;
 
-  // Transfer host to first available peer before leaving
   if (state.isHost && state.peers.size > 0) {
-    const [firstPeerId] = state.peers.keys();
-    broadcastData({ type: MSG_TYPES.TRANSFER_HOST, newHostId: firstPeerId });
+    let text = "Кому передати права хоста?\n";
+    let index = 1;
+    const peerArr = Array.from(state.peers.entries());
+    peerArr.forEach(([id, p]) => {
+      text += `${index}. ${p.name}\n`;
+      index++;
+    });
+    text += "\nВведіть номер (або залиште пустим для авто-вибору):";
+    
+    const choice = prompt(text);
+    if (choice) {
+      const idx = parseInt(choice, 10) - 1;
+      if (idx >= 0 && idx < peerArr.length) {
+        const targetPeerId = peerArr[idx][0];
+        if (state.serverMode) {
+          fetch('/api/room', {
+            method: 'POST',
+            keepalive: true,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ room: state.roomId, peerId: state.myId, targetPeerId, action: 'transfer' })
+          });
+        } else {
+          broadcastData({ type: MSG_TYPES.TRANSFER_HOST, newHostId: targetPeerId });
+        }
+      }
+    } else if (!state.serverMode) {
+       const [firstPeerId] = peerArr[0];
+       broadcastData({ type: MSG_TYPES.TRANSFER_HOST, newHostId: firstPeerId });
+    }
   }
 
   leaveRoomSilent();
@@ -1513,6 +1569,58 @@ document.addEventListener('DOMContentLoaded', () => {
     if (e.key === 'Escape') closeQualityModal();
   });
 });
+
+/* ══════════════════════════════════════════════════════════
+   VERCEL MESH HEARTBEAT
+   ══════════════════════════════════════════════════════════ */
+let vercelHeartbeatInterval = null;
+async function startVercelHeartbeat() {
+  const ping = async () => {
+    try {
+      // 1. Send heartbeat
+      await fetch('/api/room', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ room: state.roomId, peerId: state.myId })
+      });
+      // 2. Get active peers
+      const res = await fetch(`/api/room?room=${state.roomId}`);
+      const data = await res.json();
+      
+      // Update Host Status
+      if (data.host === state.myId && !state.isHost) {
+        state.isHost = true;
+        toast('Ви тепер хост кімнати!', 'info');
+        refreshMemberList();
+      } else if (data.host !== state.myId) {
+        state.isHost = false;
+        refreshMemberList();
+      }
+
+      // Connect to any new peers
+      if (data.peers) {
+        data.peers.forEach(pid => {
+          if (pid !== state.myId && !state.peers.has(pid) && !state.dataConns.has(pid)) {
+            connectToPeer(pid);
+          }
+        });
+      }
+    } catch (e) {
+      console.warn('Vercel heartbeat error:', e);
+    }
+  };
+
+  await ping();
+  vercelHeartbeatInterval = setInterval(ping, 15000);
+
+  window.addEventListener('beforeunload', () => {
+    navigator.sendBeacon('/api/room', JSON.stringify({
+      room: state.roomId,
+      peerId: state.myId,
+      action: 'leave'
+    }));
+  });
+}
 
 /* ══════════════════════════════════════════════════════════
    BOOT
