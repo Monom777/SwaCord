@@ -170,27 +170,11 @@ input:checked + .slider:before { transform: translateX(20px); }
 
 /* Onboarding Actions */
 .onboarding-actions {
-  position: relative;
-  width: min(480px, 95vw);
-  background: var(--bg-surface);
-  border: 1px solid var(--border);
-  border-radius: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
 }
 
-/* Fullscreen Button */
-.fs-toggle {
-  position: absolute;
-  top: 14px;
-  right: 16px;
-  background: transparent;
-  border: none;
-  color: var(--text-muted);
-  cursor: pointer;
-  padding: 4px;
-  font-size: 18px;
-  transition: color .2s;
-}
-.fs-toggle:hover { color: var(--text-primary); }
 
 /* Card */
 .onboarding-card {
