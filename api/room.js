@@ -22,7 +22,9 @@ export default async function handler(req, res) {
       
       let activePeers = [];
       let maxAge = Infinity;
-      let currentHost = null;
+      let oldestPeer = null;
+      
+      const creator = await redis.get(`room:${room}:creator`);
 
       // Check which peers are still alive and find the oldest one
       for (const pid of peerIds) {
@@ -32,7 +34,7 @@ export default async function handler(req, res) {
           activePeers.push({ id: pid, joinedAt });
           if (joinedAt < maxAge) {
             maxAge = joinedAt;
-            currentHost = pid;
+            oldestPeer = pid;
           }
         } else {
           // Peer expired, clean up
@@ -40,10 +42,14 @@ export default async function handler(req, res) {
         }
       }
 
+      // If creator is present, they are host. Otherwise, oldest peer is host.
+      const currentHost = (creator && activePeers.some(p => p.id === creator)) ? creator : oldestPeer;
+
       // If active peers is empty, room is empty
       return res.status(200).json({
         peers: activePeers.map(p => p.id),
-        host: currentHost
+        host: currentHost,
+        creator: creator || oldestPeer
       });
     }
 
@@ -71,6 +77,13 @@ export default async function handler(req, res) {
       const timestamp = existingJoin || joinedAt || Date.now();
       
       await redis.set(`room:${room}:peer:${peerId}`, timestamp, { ex: HEARTBEAT_TTL_SECONDS });
+      
+      // Set creator if not exists
+      const hasCreator = await redis.exists(`room:${room}:creator`);
+      if (!hasCreator) {
+        await redis.set(`room:${room}:creator`, peerId, { ex: 2592000 });
+      }
+      
       await redis.expire(`room:${room}:peers`, 2592000);
 
       return res.status(200).json({ success: true, timestamp });

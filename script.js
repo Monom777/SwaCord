@@ -70,6 +70,9 @@ const TRANSLATIONS = {
     msgPlaceholder:     'Напиши повідомлення…',
     screenPresenter:    'невідомо',
     youPresenter:       '(ти)',
+    vercelModeTitle:    'Постійна кімната (Vercel)',
+    vercelModeDesc:     'Кімната не зникає після вашого виходу. Чат зберігається.',
+    roomHistoryTitle:   'Історія кімнат',
   },
   en: {
     greeting:           'Hello! Who are you?',
@@ -126,6 +129,9 @@ const TRANSLATIONS = {
     msgPlaceholder:     'Write a message…',
     screenPresenter:    'unknown',
     youPresenter:       '(you)',
+    vercelModeTitle:    'Persistent Room (Vercel)',
+    vercelModeDesc:     'Room stays active after you leave. Chat is saved.',
+    roomHistoryTitle:   'Room History',
   },
   ru: {
     greeting:           'Привет! Кто ты?',
@@ -182,6 +188,9 @@ const TRANSLATIONS = {
     msgPlaceholder:     'Напиши сообщение…',
     screenPresenter:    'неизвестно',
     youPresenter:       '(ты)',
+    vercelModeTitle:    'Постоянная комната (Vercel)',
+    vercelModeDesc:     'Комната не исчезает после вашего выхода. Чат сохраняется.',
+    roomHistoryTitle:   'История комнат',
   },
 };
 
@@ -246,28 +255,26 @@ function initLangSwitcher() {
    THEME SWITCHER
    ══════════════════════════════════════════════════════════ */
 function initThemeSwitcher() {
-  const btns = document.querySelectorAll('.theme-btn');
-  if (!btns.length) return;
+  const btn = document.getElementById('themeBtn');
+  if (!btn) return;
 
   const currentTheme = localStorage.getItem('swacord_theme') || 'dark';
   if (currentTheme === 'light') {
     document.documentElement.setAttribute('data-theme', 'light');
-    btns.forEach(btn => btn.textContent = '☀️');
+    btn.textContent = '☀️';
   }
 
-  btns.forEach(btn => {
-    btn.addEventListener('click', () => {
-      const isLight = document.documentElement.getAttribute('data-theme') === 'light';
-      if (isLight) {
-        document.documentElement.removeAttribute('data-theme');
-        localStorage.setItem('swacord_theme', 'dark');
-        btns.forEach(b => b.textContent = '🌙');
-      } else {
-        document.documentElement.setAttribute('data-theme', 'light');
-        localStorage.setItem('swacord_theme', 'light');
-        btns.forEach(b => b.textContent = '☀️');
-      }
-    });
+  btn.addEventListener('click', () => {
+    const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+    if (isLight) {
+      document.documentElement.removeAttribute('data-theme');
+      localStorage.setItem('swacord_theme', 'dark');
+      btn.textContent = '🌙';
+    } else {
+      document.documentElement.setAttribute('data-theme', 'light');
+      localStorage.setItem('swacord_theme', 'light');
+      btn.textContent = '☀️';
+    }
   });
 }
 
@@ -339,11 +346,15 @@ const MSG_TYPES = {
   KICK:          'kick',
   BAN:           'ban',
   MUTE_FORCE:    'mute_force',
-  STOP_SCREEN:   'stop_screen',
   TRANSFER_HOST: 'transfer_host',
+  REACTION:      'reaction',
   TYPING:        'typing',
   FILE:          'file',
 };
+
+function toggleReaction(emoji) { /* ... */ }
+function startVoiceRecord() { /* ... */ }
+function stopVoiceRecord() { /* ... */ }
 
 /* Banned peer IDs for this session */
 const bannedPeers = new Set(
@@ -373,12 +384,24 @@ const state = {
 
   // Media
   localStream:     null,   // mic audio
+  localVideoStream:null,   // camera video
   screenStream:    null,   // screen video
   isMicMuted:      false,
+  isCamOn:         false,
   isSharingScreen: false,
+  selectedAudioDeviceId: localStorage.getItem('swacord_audio_input') || null,
+  selectedVideoDeviceId: localStorage.getItem('swacord_video_input') || null,
 
-  // Calls: peerId -> MediaConnection (audio)
+  // Voice recording
+  mediaRecorder:   null,
+  audioChunks:     [],
+  isRecording:     false,
+
+  // Calls: peerId -> MediaConnection (audio/video)
   activeCalls:     new Map(),
+
+  // Camera calls: peerId -> MediaConnection (video only)
+  cameraCalls:     new Map(),
 
   // Screen share calls: peerId -> MediaConnection (video only)
   screenCalls:     new Map(),
@@ -447,9 +470,20 @@ const DOM = {
   btnMic:           $('btnMic'),
   iconMicOn:        $('iconMicOn'),
   iconMicOff:       $('iconMicOff'),
+  btnCamera:        $('btnCamera'),
+  iconCamOn:        $('iconCamOn'),
+  iconCamOff:       $('iconCamOff'),
   btnScreen:        $('btnScreen'),
   iconScreenOff:    $('iconScreenOff'),
   iconScreenOn:     $('iconScreenOn'),
+  btnSettings:      $('btnSettings'),
+  settingsModal:    $('settingsModal'),
+  btnCloseSettings: $('btnCloseSettings'),
+  audioInputSelect: $('audioInputSelect'),
+  videoInputSelect: $('videoInputSelect'),
+  btnPip:           $('btnPip'),
+  btnVoice:         $('btnVoice'),
+  btnExportChat:    $('btnExportChat'),
   btnCopyLinkBar:   $('btnCopyLinkBar'),
   btnLeave:         $('btnLeave'),
   toastContainer:   $('toastContainer'),
@@ -587,7 +621,104 @@ function bindOnboardingEvents() {
   });
 
   DOM.btnMobileMenu?.addEventListener('click', () => {
-    DOM.sidebar?.classList.toggle('active');
+    DOM.sidebar.classList.toggle('active');
+  });
+
+  // Voice Messages (PTT)
+  DOM.btnVoice?.addEventListener('mousedown', startVoiceRecord);
+  DOM.btnVoice?.addEventListener('touchstart', startVoiceRecord, {passive: true});
+  window.addEventListener('mouseup', stopVoiceRecord);
+  window.addEventListener('touchend', stopVoiceRecord);
+
+  // Chat message reactions (Delegated)
+  DOM.messagesWrap.addEventListener('click', e => {
+    const btn = e.target.closest('.msg-reaction-btn');
+    if (btn) {
+      const msgId = btn.dataset.id;
+      // Show simple emoji picker or just toggle a heart for now
+      toggleReaction(msgId, '❤️');
+    }
+    const badge = e.target.closest('.msg-reaction-badge');
+    if (badge) {
+      const msgId = badge.dataset.id;
+      const emoji = badge.dataset.emoji;
+      toggleReaction(msgId, emoji);
+    }
+  });
+
+  // Settings Modal
+  DOM.btnSettings?.addEventListener('click', async () => {
+    await loadDevices();
+    DOM.settingsModal.style.display = 'flex';
+  });
+  DOM.btnCloseSettings?.addEventListener('click', () => {
+    DOM.settingsModal.style.display = 'none';
+    const newAudio = DOM.audioInputSelect.value;
+    const newVideo = DOM.videoInputSelect.value;
+    
+    if (newAudio !== state.selectedAudioDeviceId) {
+      state.selectedAudioDeviceId = newAudio;
+      localStorage.setItem('swacord_audio_input', newAudio);
+      // Re-init media with new mic (requires resetting localStream and calls, not implemented fully in this snippet, ideally we replaceTrack)
+      toast("Microphone saved. Refresh to apply.", "info");
+    }
+    
+    if (newVideo !== state.selectedVideoDeviceId) {
+      state.selectedVideoDeviceId = newVideo;
+      localStorage.setItem('swacord_video_input', newVideo);
+      // Re-init camera if on
+      if (state.isCamOn) {
+        stopCamera();
+        startCamera();
+      }
+    }
+    
+    // Save screen quality
+    const qS = DOM.qualitySelect.value;
+    let width = 1280, height = 720, fps = 30;
+    if (qS === '1080p60') { width = 1920; height = 1080; fps = 60; }
+    else if (qS === '1080p30') { width = 1920; height = 1080; fps = 30; }
+    else if (qS === '720p60') { width = 1280; height = 720; fps = 60; }
+    else if (qS === '480p30') { width = 854; height = 480; fps = 30; }
+    
+    state.screenQuality = { width, height, fps };
+    localStorage.setItem('swacord_screen_quality', JSON.stringify(state.screenQuality));
+  });
+
+  // Picture-in-Picture
+  DOM.btnPip?.addEventListener('click', async () => {
+    if (document.pictureInPictureElement) {
+      await document.exitPictureInPicture();
+    } else if (DOM.remoteVideo.readyState !== 0) {
+      await DOM.remoteVideo.requestPictureInPicture();
+    }
+  });
+  
+  DOM.remoteVideo.addEventListener('enterpictureinpicture', () => {
+    DOM.btnPip.style.color = 'var(--green)';
+  });
+  DOM.remoteVideo.addEventListener('leavepictureinpicture', () => {
+    DOM.btnPip.style.color = '';
+  });
+
+  // Export Chat
+  DOM.btnExportChat?.addEventListener('click', () => {
+    const history = JSON.parse(localStorage.getItem(CHAT_KEY) || '[]');
+    if (!history.length) return toast('Chat is empty', 'info');
+    
+    let txt = "SwaCord Chat Export\n\n";
+    history.forEach(m => {
+      const d = new Date(m.time).toLocaleString();
+      txt += `[${d}] ${m.authorName}: ${m.isFile ? '(File/Voice)' : m.text}\n`;
+    });
+    
+    const blob = new Blob([txt], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `SwaCord_Chat_${new Date().toISOString().slice(0,10)}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
   });
 
   // Close sidebar when clicking main area on mobile
@@ -646,18 +777,122 @@ function showConnecting(title, sub) {
    MICROPHONE
    ══════════════════════════════════════════════════════════ */
 async function initMedia() {
-  if (!state.localStream) {
-    state.localStream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-        sampleRate: 48000,
-        channelCount: 2
-      },
-      video: false 
-    });
+  const constraints = {
+    audio: {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+      sampleRate: 48000,
+      channelCount: 2
+    },
+    video: false 
+  };
+  
+  if (state.selectedAudioDeviceId) {
+    constraints.audio.deviceId = { exact: state.selectedAudioDeviceId };
   }
+
+  if (!state.localStream) {
+    try {
+      state.localStream = await navigator.mediaDevices.getUserMedia(constraints);
+    } catch (err) {
+      console.warn("Audio init failed:", err);
+      // Fallback without deviceId
+      delete constraints.audio.deviceId;
+      state.localStream = await navigator.mediaDevices.getUserMedia(constraints);
+    }
+  }
+}
+
+async function loadDevices() {
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const audioInputSelect = DOM.audioInputSelect;
+    const videoInputSelect = DOM.videoInputSelect;
+    
+    if (!audioInputSelect || !videoInputSelect) return;
+    
+    audioInputSelect.innerHTML = '';
+    videoInputSelect.innerHTML = '';
+    
+    devices.forEach(device => {
+      const option = document.createElement('option');
+      option.value = device.deviceId;
+      if (device.kind === 'audioinput') {
+        option.text = device.label || `Microphone ${audioInputSelect.length + 1}`;
+        audioInputSelect.appendChild(option);
+      } else if (device.kind === 'videoinput') {
+        option.text = device.label || `Camera ${videoInputSelect.length + 1}`;
+        videoInputSelect.appendChild(option);
+      }
+    });
+
+    if (state.selectedAudioDeviceId) {
+      audioInputSelect.value = state.selectedAudioDeviceId;
+    }
+    if (state.selectedVideoDeviceId) {
+      videoInputSelect.value = state.selectedVideoDeviceId;
+    }
+  } catch (err) {
+    console.warn("enumerateDevices failed:", err);
+  }
+}
+
+/* ══════════════════════════════════════════════════════════
+   CAMERA SUPPORT
+   ══════════════════════════════════════════════════════════ */
+async function toggleCamera() {
+  if (state.isCamOn) stopCamera();
+  else await startCamera();
+}
+
+async function startCamera() {
+  try {
+    const constraints = { video: true };
+    if (state.selectedVideoDeviceId) constraints.video = { deviceId: { exact: state.selectedVideoDeviceId } };
+    
+    state.localVideoStream = await navigator.mediaDevices.getUserMedia(constraints);
+    
+    DOM.localVideo.srcObject = state.localVideoStream;
+    DOM.localVideo.style.display = '';
+
+    state.dataConns.forEach((conn, peerId) => {
+      const call = state.peer.call(peerId, state.localVideoStream, {
+        metadata: { type: 'camera' },
+      });
+      call.on('stream', () => {});
+      call.on('error', err => console.warn('Camera call error:', err));
+      state.cameraCalls.set(peerId, call);
+    });
+
+    state.isCamOn = true;
+    DOM.btnCamera.classList.add('active');
+    DOM.iconCamOff.style.display = 'none';
+    DOM.iconCamOn.style.display  = '';
+  } catch (err) {
+    console.error('Camera error:', err);
+    toast('Camera error: ' + err.message, 'error');
+  }
+}
+
+function stopCamera() {
+  if (!state.isCamOn) return;
+  
+  if (state.localVideoStream) {
+    state.localVideoStream.getTracks().forEach(t => t.stop());
+    state.localVideoStream = null;
+  }
+  
+  state.cameraCalls.forEach(call => call.close());
+  state.cameraCalls.clear();
+  
+  DOM.localVideo.srcObject = null;
+  DOM.localVideo.style.display = 'none';
+  
+  state.isCamOn = false;
+  DOM.btnCamera.classList.remove('active');
+  DOM.iconCamOff.style.display = '';
+  DOM.iconCamOn.style.display  = 'none';
 }
 
 /* ══════════════════════════════════════════════════════════
@@ -712,6 +947,14 @@ function createPeer(customId) {
         hideRemoteVideo();
       });
       state.screenCalls.set(call.peer, call);
+    } else if (call.metadata?.type === 'camera') {
+      call.answer(new MediaStream());
+      call.on('stream', stream => showRemoteVideo(stream, call.peer));
+      call.on('close', () => {
+        state.cameraCalls.delete(call.peer);
+        hideRemoteVideo();
+      });
+      state.cameraCalls.set(call.peer, call);
     } else {
       handleIncomingCall(call);
     }
@@ -911,6 +1154,7 @@ function handleDataMessage(peerId, data) {
     case MSG_TYPES.CHAT:          onChatMessage(peerId, data); break;
     case MSG_TYPES.MIC:           onMicStateChange(peerId, data); break;
     case MSG_TYPES.SCREEN:        onScreenStateChange(peerId, data); break;
+    case MSG_TYPES.REACTION:      onReaction(peerId, data); break;
     case MSG_TYPES.KICK:          onKicked(); break;
     case MSG_TYPES.BAN:           onBanned(); break;
     case MSG_TYPES.MUTE_FORCE:    onForceMuted(); break;
@@ -979,13 +1223,89 @@ function onChatMessage(peerId, data) {
   const peer = state.peers.get(peerId);
   playSound('msg');
   appendMessage({
+    id:        data.id,
     authorId:  peerId,
     authorName: peer?.name || t('unknownUser'),
     avatar:    peer?.avatar || '❓',
     text:      data.text,
     time:      data.time || Date.now(),
     isSelf:    false,
+    reactions: data.reactions || {}
   });
+}
+
+function onReaction(peerId, data) {
+  const msgEl = document.getElementById(`msg-${data.msgId}`);
+  if (msgEl) {
+    let reactionsWrap = msgEl.querySelector('.msg-reactions');
+    if (!reactionsWrap) {
+      reactionsWrap = document.createElement('div');
+      reactionsWrap.className = 'msg-reactions';
+      msgEl.querySelector('.msg-body').appendChild(reactionsWrap);
+    }
+    
+    // Simple rendering of reactions
+    renderReactionsUI(reactionsWrap, data.msgId, data.reactions);
+    
+    // Update local history
+    updateHistoryReactions(data.msgId, data.reactions);
+  }
+}
+
+function renderReactionsUI(container, msgId, reactionsObj) {
+  container.innerHTML = '';
+  for (const [emoji, users] of Object.entries(reactionsObj)) {
+    if (users.length > 0) {
+      const badge = document.createElement('div');
+      badge.className = 'msg-reaction-badge';
+      badge.dataset.id = msgId;
+      badge.dataset.emoji = emoji;
+      badge.innerHTML = `${emoji} <span class="count">${users.length}</span>`;
+      if (users.includes(state.myId)) badge.style.borderColor = 'var(--green)';
+      container.appendChild(badge);
+    }
+  }
+}
+
+function updateHistoryReactions(msgId, reactionsObj) {
+  try {
+    const history = JSON.parse(localStorage.getItem(CHAT_KEY) || '[]');
+    const msg = history.find(m => m.id === msgId);
+    if (msg) {
+      msg.reactions = reactionsObj;
+      localStorage.setItem(CHAT_KEY, JSON.stringify(history));
+    }
+    
+    // If vercel mode, we would ideally sync reactions to the server, but for now we skip or do basic sync.
+    if (state.serverMode) {
+      fetch('/api/chat/react', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ room: state.roomId, msgId, reactions: reactionsObj })
+      }).catch(e => console.warn(e));
+    }
+  } catch(e) {}
+}
+
+function toggleReaction(msgId, emoji) {
+  // Read current history
+  const history = JSON.parse(localStorage.getItem(CHAT_KEY) || '[]');
+  const msg = history.find(m => m.id === msgId);
+  let reactions = msg ? msg.reactions || {} : {};
+  
+  if (!reactions[emoji]) reactions[emoji] = [];
+  const idx = reactions[emoji].indexOf(state.myId);
+  if (idx > -1) {
+    reactions[emoji].splice(idx, 1);
+    if (reactions[emoji].length === 0) delete reactions[emoji];
+  } else {
+    reactions[emoji].push(state.myId);
+  }
+  
+  // Update local
+  onReaction(state.myId, { msgId, reactions });
+  // Broadcast
+  broadcastData({ type: MSG_TYPES.REACTION, msgId, reactions });
 }
 
 function onMicStateChange(peerId, data) {
@@ -1178,8 +1498,7 @@ function bindAppEvents() {
     e.target.value = ''; // reset
   });
   DOM.btnMic.addEventListener('click', toggleMic);
-
-  // Screen share
+  DOM.btnCamera?.addEventListener('click', toggleCamera);
   DOM.btnScreen.addEventListener('click', toggleScreenShare);
   const btnScreenSettings = document.getElementById('btnScreenSettings');
   if (btnScreenSettings) btnScreenSettings.addEventListener('click', openQualityModal);
@@ -1216,19 +1535,22 @@ function sendChatMessage() {
   if (!text) return;
 
   const now = Date.now();
+  const msgId = 'msg-' + now + '-' + Math.floor(Math.random()*1000);
 
   // Show locally
   appendMessage({
+    id:         msgId,
     authorId:   state.myId,
     authorName: state.myName,
     avatar:     state.myAvatar,
     text,
     time:       now,
     isSelf:     true,
+    reactions:  {}
   });
 
   // Broadcast
-  broadcastData({ type: MSG_TYPES.CHAT, text, time: now });
+  broadcastData({ type: MSG_TYPES.CHAT, id: msgId, text, time: now });
 
   if (state.serverMode) {
     postVercelChat({ authorId: state.myId, authorName: state.myName, avatar: state.myAvatar, text, time: now });
@@ -1240,7 +1562,45 @@ function sendChatMessage() {
   DOM.msgInput.focus();
 }
 
-function appendMessage({ authorId, authorName, avatar, text, time, isSelf, isHistory, isFile, fileName, fileType, data }) {
+async function startVoiceRecord() {
+  if (state.isRecording || !state.localStream) return;
+  try {
+    state.audioChunks = [];
+    state.mediaRecorder = new MediaRecorder(state.localStream);
+    state.mediaRecorder.ondataavailable = e => state.audioChunks.push(e.data);
+    state.mediaRecorder.onstop = () => {
+      const blob = new Blob(state.audioChunks, { type: 'audio/webm' });
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const base64 = reader.result;
+        const now = Date.now();
+        const msgId = 'msg-' + now + '-' + Math.floor(Math.random()*1000);
+        appendMessage({
+          id: msgId,
+          authorId: state.myId, authorName: state.myName, avatar: state.myAvatar,
+          time: now, isSelf: true,
+          isFile: true, fileName: 'voice.webm', fileType: 'audio/webm', data: base64
+        });
+        broadcastData({ type: MSG_TYPES.FILE, fileName: 'voice.webm', fileType: 'audio/webm', data: base64, time: now });
+      };
+      reader.readAsDataURL(blob);
+    };
+    state.mediaRecorder.start();
+    state.isRecording = true;
+    DOM.btnVoice.classList.add('recording');
+  } catch (err) {
+    console.warn("MediaRecorder error:", err);
+  }
+}
+
+function stopVoiceRecord() {
+  if (!state.isRecording || !state.mediaRecorder) return;
+  state.mediaRecorder.stop();
+  state.isRecording = false;
+  DOM.btnVoice.classList.remove('recording');
+}
+
+function appendMessage({ id, authorId, authorName, avatar, text, time, isSelf, isHistory, isFile, fileName, fileType, data, reactions }) {
   // Remove empty state placeholder
   const empty = DOM.messagesWrap.querySelector('.empty-chat');
   if (empty) empty.remove();
@@ -1254,8 +1614,10 @@ function appendMessage({ authorId, authorName, avatar, text, time, isSelf, isHis
     state.lastMsgTime   &&
     (time - state.lastMsgTime) < 3 * 60 * 1000;
 
+  const msgId = id || ('local-' + Date.now());
   const div = document.createElement('div');
-  div.className = 'msg fade-in' + (isContinued ? ' continued' : '') + (isHistory ? ' msg-history' : '');
+  div.className = `msg${isSelf ? ' msg-self' : ''}${isHistory ? ' msg-history' : ''}` + (isContinued ? ' continued' : '');
+  div.id = `msg-${msgId}`;
 
   let contentHtml = '';
   if (isFile) {
@@ -1276,10 +1638,17 @@ function appendMessage({ authorId, authorName, avatar, text, time, isSelf, isHis
         <span class="msg-time">${timeStr}</span>
       </div>
       <div class="msg-text">${contentHtml}</div>
+      <div class="msg-reactions"></div>
     </div>
+    <div class="msg-reaction-btn" data-id="${msgId}" title="React">➕</div>
   `;
 
   DOM.messagesWrap.appendChild(div);
+  
+  if (msg.reactions) {
+    renderReactionsUI(div.querySelector('.msg-reactions'), msgId, msg.reactions);
+  }
+
   scrollToBottom();
 
   state.lastMsgAuthor = authorId;
@@ -1547,6 +1916,7 @@ function showRemoteVideo(stream, peerId) {
   const videoStream = new MediaStream(videoTracks);
   DOM.remoteVideo.srcObject = videoStream;
   DOM.videoArea.style.display = '';
+  DOM.btnPip.style.display = ''; // Show PiP button
 
   const peer = state.peers.get(peerId);
   DOM.videoPresenter.textContent = `— ${peer?.name || peerId}`;
@@ -1554,8 +1924,9 @@ function showRemoteVideo(stream, peerId) {
 
 function hideRemoteVideo() {
   DOM.remoteVideo.srcObject = null;
-  if (!state.isSharingScreen) {
+  if (!state.isSharingScreen && state.cameraCalls.size === 0) {
     DOM.videoArea.style.display = 'none';
+    DOM.btnPip.style.display = 'none';
   }
 }
 
