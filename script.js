@@ -405,13 +405,21 @@ function checkRoomInUrl() {
   const params = new URLSearchParams(window.location.search);
   const roomParam = params.get('room');
   if (roomParam) {
-    // Guest: show join button
+    // Guest: show join button, hide create button and mode switch
     state.roomId = roomParam;
+    
+    // Hide create UI
+    const modeSwitch = document.getElementById('modeSwitchContainer');
+    const divider = document.getElementById('onboardingDivider');
+    if (modeSwitch) modeSwitch.style.display = 'none';
+    if (divider) divider.style.display = 'none';
+    DOM.btnCreate.style.display = 'none';
+
+    // Show join UI
     DOM.joinHint.style.display = 'flex';
     DOM.joinRoomId.textContent = roomParam.substring(0, 12) + '…';
     DOM.btnJoin.style.display = 'flex';
   }
-  // Host: always show create room
 }
 
 /* ══════════════════════════════════════════════════════════
