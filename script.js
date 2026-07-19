@@ -504,6 +504,7 @@ function init() {
   const savedName = localStorage.getItem('swacord_name');
   if (savedName && DOM.nicknameInput) {
     DOM.nicknameInput.value = savedName;
+    DOM.nicknameInput.dispatchEvent(new Event('input'));
   }
 
   renderRoomHistory();
