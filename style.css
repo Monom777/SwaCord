@@ -1413,6 +1413,11 @@ input:checked + .slider:before { transform: translateX(20px); }
     display: flex !important;
   }
 
+  /* Hide screen share on mobile since it's unsupported */
+  #btnScreen, #btnScreenSettings {
+    display: none !important;
+  }
+
   /* Control bar */
   .control-bar-inner {
     padding: 10px;

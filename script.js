@@ -1454,6 +1454,11 @@ async function toggleScreenShare() {
 }
 
 async function startScreenShare() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+    toast('Демонстрація екрану не підтримується на цьому пристрої (мобільний браузер).', 'error');
+    return;
+  }
+
   const q = state.screenQuality;
   try {
     state.screenStream = await navigator.mediaDevices.getDisplayMedia({
