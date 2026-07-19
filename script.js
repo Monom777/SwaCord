@@ -16,7 +16,7 @@
    ══════════════════════════════════════════════════════════ */
 const TRANSLATIONS = {
   uk: {
-    greeting:           'Привіт! Хто ти?',
+    greeting:           'Привіт! Як тебе звати?',
     chooseAvatar:       'Обери аватарку та введи нікнейм',
     nickname:           'Нікнейм',
     nicknamePlaceholder:'наприклад: Nazar',
@@ -243,6 +243,33 @@ function initLangSwitcher() {
 }
 
 /* ══════════════════════════════════════════════════════════
+   THEME SWITCHER
+   ══════════════════════════════════════════════════════════ */
+function initThemeSwitcher() {
+  const btn = document.getElementById('themeBtn');
+  if (!btn) return;
+
+  const currentTheme = localStorage.getItem('swacord_theme') || 'dark';
+  if (currentTheme === 'light') {
+    document.documentElement.setAttribute('data-theme', 'light');
+    btn.textContent = '☀️';
+  }
+
+  btn.addEventListener('click', () => {
+    const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+    if (isLight) {
+      document.documentElement.removeAttribute('data-theme');
+      localStorage.setItem('swacord_theme', 'dark');
+      btn.textContent = '🌙';
+    } else {
+      document.documentElement.setAttribute('data-theme', 'light');
+      localStorage.setItem('swacord_theme', 'light');
+      btn.textContent = '☀️';
+    }
+  });
+}
+
+/* ══════════════════════════════════════════════════════════
    CONSTANTS & CONFIG
    ══════════════════════════════════════════════════════════ */
 const AVATARS = [
@@ -374,9 +401,18 @@ const DOM = {
 function init() {
   applyLang();
   initLangSwitcher();
+  initThemeSwitcher();
   buildAvatarGrid();
   checkRoomInUrl();
   bindOnboardingEvents();
+
+  // Load saved nickname
+  const savedName = localStorage.getItem('swacord_name');
+  if (savedName && DOM.nicknameInput) {
+    DOM.nicknameInput.value = savedName;
+  }
+
+  DOM.nicknameInput?.focus();
 }
 
 /** Build emoji avatar picker */
@@ -448,7 +484,8 @@ function bindOnboardingEvents() {
 async function onCreateRoom() {
   const name = DOM.nicknameInput.value.trim();
   if (!name) return;
-  state.myName   = name;
+  state.myName = name;
+  localStorage.setItem('swacord_name', name);
   
   const modeSwitch = document.getElementById('modeSwitch');
   state.serverMode = modeSwitch ? modeSwitch.checked : false;
@@ -470,6 +507,7 @@ async function onJoinRoom() {
   const name = DOM.nicknameInput.value.trim();
   if (!name) return;
   state.myName = name;
+  localStorage.setItem('swacord_name', name);
   state.isHost  = false;
 
   showConnecting(t('joiningRoomConn'), t('connectingCloud'));
@@ -561,9 +599,20 @@ function createPeer(customId) {
   state.peer.on('connection', handleIncomingData);
   state.peer.on('error', err => {
     console.error('[PeerJS Error]', err);
-    toast('PeerJS: ' + err.type, 'error');
     if (err.type === 'peer-unavailable') {
-      toast(t('hostUnavailable'), 'error');
+      toast(t('hostUnavailable'), 'error', 5000);
+      // Stop infinite loading
+      DOM.overlay.classList.remove('active');
+      setTimeout(() => DOM.overlay.style.display = 'none', 400);
+      
+      if (!state.serverMode) {
+        setTimeout(() => {
+          alert(t('hostUnavailable'));
+          window.location.href = window.location.pathname; // Go home
+        }, 500);
+      }
+    } else {
+      toast('PeerJS: ' + err.type, 'error');
     }
   });
   state.peer.on('disconnected', () => {
