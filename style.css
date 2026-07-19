@@ -88,6 +88,7 @@ body {
   opacity: 0;
   pointer-events: none;
   transition: opacity .4s var(--ease-out);
+  padding: 16px;
 }
 .overlay.active { opacity: 1; pointer-events: all; }
 
@@ -196,7 +197,7 @@ input:checked + .slider:before { transform: translateX(20px); }
   display: flex;
   flex-direction: column;
   gap: 8px;
-  max-height: 200px;
+  max-height: 180px; /* slightly smaller to fit screen */
   overflow-y: auto;
 }
 .history-item {
@@ -230,6 +231,8 @@ input:checked + .slider:before { transform: translateX(20px); }
 .onboarding-card {
   position: relative;
   width: min(480px, 95vw);
+  max-height: 90vh;
+  overflow-y: auto;
   background: var(--bg-surface);
   border: 1px solid var(--border);
   border-radius: 20px;
@@ -240,6 +243,11 @@ input:checked + .slider:before { transform: translateX(20px); }
     0 0 80px rgba(124,58,237,.08);
   animation: card-in .5s var(--ease-spring) both;
 }
+/* Scrollbar for onboarding card */
+.onboarding-card::-webkit-scrollbar { width: 6px; }
+.onboarding-card::-webkit-scrollbar-track { background: transparent; }
+.onboarding-card::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+.onboarding-card::-webkit-scrollbar-thumb:hover { background: var(--accent-500); }
 @keyframes card-in {
   from { opacity:0; transform: translateY(20px) scale(.97); }
   to   { opacity:1; transform: translateY(0) scale(1); }
@@ -1420,7 +1428,8 @@ input:checked + .slider:before { transform: translateX(20px); }
 
   /* Onboarding screen */
   .onboarding-card {
-    padding: 24px;
+    padding: 24px 20px;
+    max-height: 95vh;
   }
   .avatar-grid {
     grid-template-columns: repeat(4, 1fr);
