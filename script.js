@@ -710,7 +710,18 @@ function handleDataMessage(peerId, data) {
     case MSG_TYPES.MUTE_FORCE:    onForceMuted(); break;
     case MSG_TYPES.STOP_SCREEN:   onStopScreenCmd(); break;
     case MSG_TYPES.TRANSFER_HOST: onTransferHost(data); break;
-    case 'server_mode':           state.serverMode = data.enabled; break;
+    case 'server_mode':
+      const changed = (state.serverMode !== data.enabled);
+      state.serverMode = data.enabled; 
+      if (changed && !state.isHost) {
+        DOM.messagesWrap.innerHTML = '';
+        if (state.serverMode) {
+          fetchVercelChatHistory();
+        } else {
+          loadChatHistory();
+        }
+      }
+      break;
     default: console.warn('Unknown message type:', data.type);
   }
 }
