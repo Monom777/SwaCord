@@ -977,6 +977,10 @@ function sendChatMessage() {
   // Broadcast
   broadcastData({ type: MSG_TYPES.CHAT, text, time: now });
 
+  if (state.serverMode) {
+    postVercelChat({ authorId: state.myId, authorName: state.myName, avatar: state.myAvatar, text, time: now });
+  }
+
   DOM.msgInput.value = '';
   DOM.msgInput.focus();
 }
@@ -1015,8 +1019,8 @@ function appendMessage({ authorId, authorName, avatar, text, time, isSelf, isHis
   state.lastMsgAuthor = authorId;
   state.lastMsgTime   = time;
 
-  // Persist to localStorage (only live messages, not history replays)
-  if (!isHistory) saveMsgToHistory({ authorId, authorName, avatar, text, time, isSelf });
+  // Persist to localStorage (only live messages, not history replays, and only in P2P mode)
+  if (!isHistory && !state.serverMode) saveMsgToHistory({ authorId, authorName, avatar, text, time, isSelf });
 }
 
 /* ══════════════════════════════════════════════════════════
