@@ -900,51 +900,42 @@ function stopCamera() {
    PEER CREATION
    ══════════════════════════════════════════════════════════ */
 function createPeer(customId) {
+  const iceServers = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    // Proven public TURN servers
+    {
+      urls: ['turn:eu-0.turn.peerjs.com:3478', 'turn:us-0.turn.peerjs.com:3478'],
+      username: 'peerjs',
+      credential: 'peerjsp',
+    },
+    {
+      urls: 'turn:openrelay.metered.ca:80',
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    },
+    {
+      urls: 'turn:openrelay.metered.ca:443',
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    },
+    {
+      urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    },
+  ];
+
   const options = {
     debug: 0,
     config: {
-      iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' },
-        { urls: 'stun:stun2.l.google.com:19302' },
-        { urls: 'stun:stun3.l.google.com:19302' },
-        { urls: 'stun:stun4.l.google.com:19302' },
-        { urls: 'stun:global.stun.twilio.com:3478' },
-        // Free TURN servers for relay when direct connection fails
-        {
-          urls: 'turn:openrelay.metered.ca:80',
-          username: 'openrelayproject',
-          credential: 'openrelayproject',
-        },
-        {
-          urls: 'turn:openrelay.metered.ca:443',
-          username: 'openrelayproject',
-          credential: 'openrelayproject',
-        },
-        {
-          urls: 'turn:openrelay.metered.ca:443?transport=tcp',
-          username: 'openrelayproject',
-          credential: 'openrelayproject',
-        },
-        {
-          urls: 'turn:relay.metered.ca:80',
-          username: 'e8dd1f4a2a4a0873d8c4bff7',
-          credential: 'uFLEuKTGMhXBqnlC',
-        },
-        {
-          urls: 'turn:relay.metered.ca:443',
-          username: 'e8dd1f4a2a4a0873d8c4bff7',
-          credential: 'uFLEuKTGMhXBqnlC',
-        },
-        {
-          urls: 'turn:relay.metered.ca:443?transport=tcp',
-          username: 'e8dd1f4a2a4a0873d8c4bff7',
-          credential: 'uFLEuKTGMhXBqnlC',
-        },
-      ],
+      iceServers,
       iceTransportPolicy: 'all',
+      iceCandidatePoolSize: 10,
     },
   };
+
 
 
   state.peer = customId ? new Peer(customId, options) : new Peer(options);
@@ -1076,21 +1067,16 @@ function connectToPeer(peerId) {
     setupCall(call, peerId);
   }
 
-  // Timeout if connection doesn't open within 20 seconds
+  // Timeout — if not connected in 15s, retry with relay-only mode
   const connTimeout = setTimeout(() => {
-    if (dataConn.open) return; // Already connected, ignore
-    console.warn('[SwaCord] Connection timeout to', peerId);
-    toast('⚠️ ' + t('connError') + ' (timeout)', 'error', 5000);
-    // Go back to start if no server mode
-    if (!state.serverMode) {
-      DOM.overlay.classList.remove('active');
-      setTimeout(() => DOM.overlay.style.display = 'none', 400);
-    }
-  }, 20000);
+    if (dataConn.open) return;
+    console.warn('[SwaCord] ICE negotiation timeout, retrying with relay-only...');
+    toast('🔄 Повтор з’єднання через relay...', 'info', 3000);
+    connectToPeerRelay(peerId);
+  }, 15000);
 
   dataConn.on('open', () => {
     clearTimeout(connTimeout);
-    // App launches after data channel opens
     launchApp();
     sendInit(dataConn);
   });
@@ -1098,14 +1084,102 @@ function connectToPeer(peerId) {
   dataConn.on('error', err => {
     clearTimeout(connTimeout);
     console.error('DataConn error:', err);
-    toast(t('connError') + err.message, 'error');
+    if (err.message && err.message.includes('Negotiation')) {
+      toast('🔄 Повтор через relay...', 'info', 3000);
+      setTimeout(() => connectToPeerRelay(peerId), 1000);
+    } else {
+      toast(t('connError') + err.message, 'error');
+    }
   });
 }
 
+/** Retry connection using TURN relay only (fallback for strict NAT/firewalls) */
+function connectToPeerRelay(peerId) {
+  if (state.dataConns.get(peerId)?.open) return; // Already connected
+
+  console.log('[SwaCord] Relay-only connection to', peerId);
+
+  // Create a temporary peer with relay-only policy
+  const relayOptions = {
+    debug: 0,
+    config: {
+      iceServers: [
+        {
+          urls: ['turn:eu-0.turn.peerjs.com:3478', 'turn:us-0.turn.peerjs.com:3478'],
+          username: 'peerjs',
+          credential: 'peerjsp',
+        },
+        {
+          urls: 'turn:openrelay.metered.ca:443',
+          username: 'openrelayproject',
+          credential: 'openrelayproject',
+        },
+        {
+          urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+          username: 'openrelayproject',
+          credential: 'openrelayproject',
+        },
+      ],
+      iceTransportPolicy: 'relay', // Force relay only
+    },
+  };
+
+  // Destroy old peer and create fresh one with relay-only
+  if (state.peer && !state.peer.destroyed) {
+    state.peer.destroy();
+  }
+
+  const newPeer = new Peer(relayOptions);
+  state.peer = newPeer;
+
+  newPeer.on('open', newId => {
+    state.myId = newId;
+    console.log('[SwaCord] Relay peer open, id:', newId);
+
+    const dataConn = newPeer.connect(peerId, { reliable: true, serialization: 'json' });
+    setupDataConnection(dataConn);
+
+    if (state.localStream) {
+      const call = newPeer.call(peerId, state.localStream);
+      setupCall(call, peerId);
+    }
+
+    const relayTimeout = setTimeout(() => {
+      if (dataConn.open) return;
+      toast('❌ Не вдалося підключитися. Перевірте посилання або спробуйте пізніше.', 'error', 7000);
+      DOM.overlay.classList.remove('active');
+      setTimeout(() => DOM.overlay.style.display = 'none', 400);
+    }, 20000);
+
+    dataConn.on('open', () => {
+      clearTimeout(relayTimeout);
+      toast('✅ Підключено через relay!', 'success', 3000);
+      launchApp();
+      sendInit(dataConn);
+    });
+
+    dataConn.on('error', err => {
+      clearTimeout(relayTimeout);
+      toast('❌ ' + t('connError') + err.message, 'error', 6000);
+      DOM.overlay.classList.remove('active');
+      setTimeout(() => DOM.overlay.style.display = 'none', 400);
+    });
+  });
+
+  newPeer.on('connection', handleIncomingData);
+  newPeer.on('call', call => handleIncomingCall(call));
+  newPeer.on('error', err => {
+    console.error('[Relay Peer Error]', err);
+    toast('❌ Relay помилка: ' + err.type, 'error', 5000);
+    DOM.overlay.classList.remove('active');
+    setTimeout(() => DOM.overlay.style.display = 'none', 400);
+  });
+}
 
 /* ══════════════════════════════════════════════════════════
    INCOMING CONNECTIONS (HOST SIDE)
    ══════════════════════════════════════════════════════════ */
+
 function handleIncomingCall(call) {
   console.log('[SwaCord] Incoming call from', call.peer);
   call.answer(state.localStream);
