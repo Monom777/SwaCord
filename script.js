@@ -906,10 +906,46 @@ function createPeer(customId) {
       iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
         { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun2.l.google.com:19302' },
+        { urls: 'stun:stun3.l.google.com:19302' },
+        { urls: 'stun:stun4.l.google.com:19302' },
         { urls: 'stun:global.stun.twilio.com:3478' },
+        // Free TURN servers for relay when direct connection fails
+        {
+          urls: 'turn:openrelay.metered.ca:80',
+          username: 'openrelayproject',
+          credential: 'openrelayproject',
+        },
+        {
+          urls: 'turn:openrelay.metered.ca:443',
+          username: 'openrelayproject',
+          credential: 'openrelayproject',
+        },
+        {
+          urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+          username: 'openrelayproject',
+          credential: 'openrelayproject',
+        },
+        {
+          urls: 'turn:relay.metered.ca:80',
+          username: 'e8dd1f4a2a4a0873d8c4bff7',
+          credential: 'uFLEuKTGMhXBqnlC',
+        },
+        {
+          urls: 'turn:relay.metered.ca:443',
+          username: 'e8dd1f4a2a4a0873d8c4bff7',
+          credential: 'uFLEuKTGMhXBqnlC',
+        },
+        {
+          urls: 'turn:relay.metered.ca:443?transport=tcp',
+          username: 'e8dd1f4a2a4a0873d8c4bff7',
+          credential: 'uFLEuKTGMhXBqnlC',
+        },
       ],
+      iceTransportPolicy: 'all',
     },
   };
+
 
   state.peer = customId ? new Peer(customId, options) : new Peer(options);
 
@@ -1040,17 +1076,32 @@ function connectToPeer(peerId) {
     setupCall(call, peerId);
   }
 
+  // Timeout if connection doesn't open within 20 seconds
+  const connTimeout = setTimeout(() => {
+    if (dataConn.open) return; // Already connected, ignore
+    console.warn('[SwaCord] Connection timeout to', peerId);
+    toast('⚠️ ' + t('connError') + ' (timeout)', 'error', 5000);
+    // Go back to start if no server mode
+    if (!state.serverMode) {
+      DOM.overlay.classList.remove('active');
+      setTimeout(() => DOM.overlay.style.display = 'none', 400);
+    }
+  }, 20000);
+
   dataConn.on('open', () => {
+    clearTimeout(connTimeout);
     // App launches after data channel opens
     launchApp();
     sendInit(dataConn);
   });
 
   dataConn.on('error', err => {
+    clearTimeout(connTimeout);
     console.error('DataConn error:', err);
     toast(t('connError') + err.message, 'error');
   });
 }
+
 
 /* ══════════════════════════════════════════════════════════
    INCOMING CONNECTIONS (HOST SIDE)
