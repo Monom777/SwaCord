@@ -1,12 +1,12 @@
 /**
  * SwaCord — script.js
- * Serverless P2P Messenger powered by PeerJS
+ * Serverless P2P Messenger powered by Native WebRTC
  *
  * Architecture:
- *  - Signalling via PeerJS public cloud (no own backend)
- *  - Voice via MediaConnection (getUserMedia)
- *  - Screen share via replaceTrack on RTCRtpSender
- *  - Text chat + profile sync via DataConnection (DataChannel)
+ *  - Signalling via /api/signal (Upstash Redis polling) — no peerjs.com!
+ *  - Voice via RTCPeerConnection audio tracks (getUserMedia)
+ *  - Screen share via RTCPeerConnection video track renegotiation
+ *  - Text chat via RTCDataChannel
  */
 
 'use strict';
@@ -368,11 +368,10 @@ function persistBanned() {
    STATE
    ══════════════════════════════════════════════════════════ */
 const state = {
-  peer:            null,
   myId:            null,
-  roomId:          null,   // host's peer ID
+  roomId:          null,
   isHost:          false,
-  serverMode:      false,  // whether chat is saved on Vercel
+  serverMode:      false,
   launched:        false,
 
   // Profile
@@ -397,16 +396,7 @@ const state = {
   audioChunks:     [],
   isRecording:     false,
 
-  // Calls: peerId -> MediaConnection (audio/video)
-  activeCalls:     new Map(),
-
-  // Camera calls: peerId -> MediaConnection (video only)
-  cameraCalls:     new Map(),
-
-  // Screen share calls: peerId -> MediaConnection (video only)
-  screenCalls:     new Map(),
-
-  // Data connections: peerId -> DataConnection
+  // Data connections: peerId -> { open, send(), close() }
   dataConns:       new Map(),
 
   // Chat
@@ -552,7 +542,7 @@ function renderRoomHistory() {
       localStorage.setItem('swacord_name', name);
       
       showConnecting(t('joiningRoomConn'), t('connectingCloud'));
-      initMedia().then(() => createPeer(null));
+      initMedia().then(() => initMyPeer());
     });
 
     list.appendChild(li);
@@ -752,7 +742,7 @@ async function onCreateRoom() {
 
   showConnecting(t('creatingRoom'), t('connectingCloud'));
   await initMedia();
-  createPeer(null); 
+  await initMyPeer();
 }
 
 async function onJoinRoom() {
@@ -764,7 +754,7 @@ async function onJoinRoom() {
 
   showConnecting(t('joiningRoomConn'), t('connectingCloud'));
   await initMedia();
-  createPeer(null);
+  await initMyPeer();
 }
 
 function showConnecting(title, sub) {
@@ -896,15 +886,17 @@ function stopCamera() {
   DOM.iconCamOn.style.display  = 'none';
 }
 
+
 /* ══════════════════════════════════════════════════════════
-   PEER CREATION
+   NATIVE WebRTC ENGINE — replaces PeerJS entirely
+   Signalling via /api/signal (Upstash Redis polling)
    ══════════════════════════════════════════════════════════ */
-function createPeer(customId) {
-  const iceServers = [
+
+const ICE_CONFIG = {
+  iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
     { urls: 'stun:stun2.l.google.com:19302' },
-    // Proven public TURN servers
     {
       urls: ['turn:eu-0.turn.peerjs.com:3478', 'turn:us-0.turn.peerjs.com:3478'],
       username: 'peerjs',
@@ -916,342 +908,268 @@ function createPeer(customId) {
       credential: 'openrelayproject',
     },
     {
-      urls: 'turn:openrelay.metered.ca:443',
-      username: 'openrelayproject',
-      credential: 'openrelayproject',
-    },
-    {
       urls: 'turn:openrelay.metered.ca:443?transport=tcp',
       username: 'openrelayproject',
       credential: 'openrelayproject',
     },
-  ];
+  ],
+  iceTransportPolicy: 'all',
+  iceCandidatePoolSize: 10,
+};
 
-  const options = {
-    debug: 0,
-    config: {
-      iceServers,
-      iceTransportPolicy: 'all',
-      iceCandidatePoolSize: 10,
-    },
-  };
+// Map peerId -> { pc: RTCPeerConnection, dc: RTCDataChannel, initiator: bool }
+const rtcConns = new Map();
+let sigPollInterval = null;
 
-
-
-  state.peer = customId ? new Peer(customId, options) : new Peer(options);
-
-  state.peer.on('open', peerId => {
-    state.myId = peerId;
-    console.log('[SwaCord] My PeerID:', peerId);
-
-    if (state.serverMode) {
-      const url = new URL(window.location.href);
-      url.searchParams.set('room', state.roomId);
-      window.history.replaceState({}, '', url.toString());
-      
-      startVercelHeartbeat();
-      launchApp();
-    } else {
-      if (state.isHost) {
-        state.roomId = peerId;
-        const url = new URL(window.location.href);
-        url.searchParams.set('room', peerId);
-        window.history.replaceState({}, '', url.toString());
-        launchApp();
-      } else {
-        DOM.connectingSub.textContent = t('connectingToHost');
-        connectToPeer(state.roomId);
-      }
-    }
-  });
-
-  state.peer.on('call', call => {
-    // Screen share calls come with metadata {type:'screen'}
-    if (call.metadata?.type === 'screen') {
-      call.answer(new MediaStream());
-      call.on('stream', stream => showRemoteVideo(stream, call.peer));
-      call.on('close', () => {
-        state.screenCalls.delete(call.peer);
-        hideRemoteVideo();
-      });
-      state.screenCalls.set(call.peer, call);
-    } else if (call.metadata?.type === 'camera') {
-      call.answer(new MediaStream());
-      call.on('stream', stream => showRemoteVideo(stream, call.peer));
-      call.on('close', () => {
-        state.cameraCalls.delete(call.peer);
-        hideRemoteVideo();
-      });
-      state.cameraCalls.set(call.peer, call);
-    } else {
-      handleIncomingCall(call);
-    }
-  });
-  state.peer.on('connection', handleIncomingData);
-  state.peer.on('error', err => {
-    console.error('[PeerJS Error]', err);
-    if (err.type === 'peer-unavailable') {
-      toast(t('hostUnavailable'), 'error', 5000);
-      // Stop infinite loading
-      DOM.overlay.classList.remove('active');
-      setTimeout(() => DOM.overlay.style.display = 'none', 400);
-      
-      if (!state.serverMode) {
-        setTimeout(() => {
-          alert(t('hostUnavailable'));
-          window.location.href = window.location.pathname; // Go home
-        }, 500);
-      }
-    } else {
-      toast('PeerJS: ' + err.type, 'error');
-    }
-  });
-  state.peer.on('disconnected', () => {
-    setBadge('offline', t('offlineBadge'));
-    toast(t('disconnected'), 'error');
-    state.peer.reconnect();
-  });
-  state.peer.on('close', () => setBadge('offline', t('offlineBadge')));
+function generateId() {
+  return 'sw' + Date.now().toString(36) + Math.random().toString(36).substr(2, 8);
 }
 
-/* ══════════════════════════════════════════════════════════
-   HOST: LAUNCH APP
-   ══════════════════════════════════════════════════════════ */
-async function launchApp() {
-  if (state.launched) return;
-  state.launched = true;
-
-  if (state.serverMode && state.roomId) {
-    let history = JSON.parse(localStorage.getItem('swacord_rooms') || '[]');
-    history = history.filter(h => h.id !== state.roomId);
-    history.unshift({ id: state.roomId, date: Date.now() });
-    if (history.length > 10) history = history.slice(0, 10);
-    localStorage.setItem('swacord_rooms', JSON.stringify(history));
-  }
-
-  DOM.overlay.classList.remove('active');
-  setTimeout(() => DOM.overlay.style.display = 'none', 400);
-
-  DOM.app.style.display        = '';
-  DOM.controlBar.style.display = '';
-
-  DOM.roomIdDisplay.textContent = state.roomId.substring(0, 14) + '…';
-
-  setBadge('online', t('onlineBadge'));
-  renderMyProfile();
-  addMyselfToList();
-
-  bindAppEvents();
-
-  // Load chat history depending on mode
-  if (state.serverMode) {
-    await fetchVercelChatHistory();
-  } else {
-    loadChatHistory();
-  }
-
-  toast(state.isHost ? t('roomCreated') : t('connectedToRoom'), 'success');
+async function sendSignal(to, type, data) {
+  try {
+    await fetch('/api/signal', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ room: state.roomId, id: state.myId, to, type, data }),
+    });
+  } catch (e) { console.warn('[Signal] send error:', e); }
 }
 
-/* ══════════════════════════════════════════════════════════
-   GUEST: CONNECT TO HOST
-   ══════════════════════════════════════════════════════════ */
-function connectToPeer(peerId) {
-  // 1. Data connection
-  const dataConn = state.peer.connect(peerId, { reliable: true, serialization: 'json' });
-  setupDataConnection(dataConn);
+async function pollSignals() {
+  if (!state.myId || !state.roomId) return;
+  try {
+    const res = await fetch(`/api/signal?room=${encodeURIComponent(state.roomId)}&id=${state.myId}`);
+    if (!res.ok) return;
+    const { signals } = await res.json();
+    for (const sig of (signals || [])) {
+      await handleIncomingSignal(sig).catch(e => console.warn('[Signal] handle error:', e));
+    }
+  } catch (e) { /* ignore */ }
+}
 
-  // 2. Voice call
+async function handleIncomingSignal(sig) {
+  const { from, type, data } = sig;
+  console.log('[Signal] recv', type, 'from', from);
+
+  if (type === 'offer') {
+    let entry = rtcConns.get(from);
+    if (entry && entry.pc.connectionState !== 'connected') {
+      try { entry.pc.close(); } catch {}
+      rtcConns.delete(from);
+      entry = null;
+    }
+    if (!entry) entry = createRTCConnection(from, false);
+    await entry.pc.setRemoteDescription(new RTCSessionDescription(data));
+    const answer = await entry.pc.createAnswer();
+    await entry.pc.setLocalDescription(answer);
+    await sendSignal(from, 'answer', answer);
+
+  } else if (type === 'answer') {
+    const entry = rtcConns.get(from);
+    if (entry && entry.pc.signalingState !== 'stable') {
+      await entry.pc.setRemoteDescription(new RTCSessionDescription(data));
+    }
+
+  } else if (type === 'ice') {
+    const entry = rtcConns.get(from);
+    if (entry && data) {
+      try { await entry.pc.addIceCandidate(new RTCIceCandidate(data)); } catch {}
+    }
+  }
+}
+
+function createRTCConnection(peerId, isInitiator) {
+  const pc = new RTCPeerConnection(ICE_CONFIG);
+  const entry = { pc, dc: null, initiator: isInitiator, peerId };
+  rtcConns.set(peerId, entry);
+
   if (state.localStream) {
-    const call = state.peer.call(peerId, state.localStream);
-    setupCall(call, peerId);
+    state.localStream.getTracks().forEach(track => pc.addTrack(track, state.localStream));
   }
 
-  // Timeout — if not connected in 15s, retry with relay-only mode
-  const connTimeout = setTimeout(() => {
-    if (dataConn.open) return;
-    console.warn('[SwaCord] ICE negotiation timeout, retrying with relay-only...');
-    toast('🔄 Повтор з’єднання через relay...', 'info', 3000);
-    connectToPeerRelay(peerId);
-  }, 15000);
-
-  dataConn.on('open', () => {
-    clearTimeout(connTimeout);
-    launchApp();
-    sendInit(dataConn);
-  });
-
-  dataConn.on('error', err => {
-    clearTimeout(connTimeout);
-    console.error('DataConn error:', err);
-    if (err.message && err.message.includes('Negotiation')) {
-      toast('🔄 Повтор через relay...', 'info', 3000);
-      setTimeout(() => connectToPeerRelay(peerId), 1000);
-    } else {
-      toast(t('connError') + err.message, 'error');
-    }
-  });
-}
-
-/** Retry connection using TURN relay only (fallback for strict NAT/firewalls) */
-function connectToPeerRelay(peerId) {
-  if (state.dataConns.get(peerId)?.open) return; // Already connected
-
-  console.log('[SwaCord] Relay-only connection to', peerId);
-
-  // Create a temporary peer with relay-only policy
-  const relayOptions = {
-    debug: 0,
-    config: {
-      iceServers: [
-        {
-          urls: ['turn:eu-0.turn.peerjs.com:3478', 'turn:us-0.turn.peerjs.com:3478'],
-          username: 'peerjs',
-          credential: 'peerjsp',
-        },
-        {
-          urls: 'turn:openrelay.metered.ca:443',
-          username: 'openrelayproject',
-          credential: 'openrelayproject',
-        },
-        {
-          urls: 'turn:openrelay.metered.ca:443?transport=tcp',
-          username: 'openrelayproject',
-          credential: 'openrelayproject',
-        },
-      ],
-      iceTransportPolicy: 'relay', // Force relay only
-    },
+  pc.onicecandidate = async e => {
+    if (e.candidate) await sendSignal(peerId, 'ice', e.candidate.toJSON());
   };
 
-  // Destroy old peer and create fresh one with relay-only
-  if (state.peer && !state.peer.destroyed) {
-    state.peer.destroy();
+  pc.ontrack = e => {
+    const stream = e.streams[0];
+    if (!stream) return;
+    if (stream.getVideoTracks().length > 0) {
+      showRemoteVideo(stream, peerId);
+    } else {
+      playRemoteAudio(stream, peerId);
+    }
+    stream.onaddtrack = () => {
+      if (stream.getVideoTracks().length > 0) showRemoteVideo(stream, peerId);
+    };
+  };
+
+  pc.ondatachannel = e => {
+    entry.dc = e.channel;
+    setupDataChannelNative(e.channel, peerId);
+  };
+
+  pc.onnegotiationneeded = async () => {
+    if (!isInitiator || pc.signalingState !== 'stable') return;
+    try {
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      await sendSignal(peerId, 'offer', offer);
+    } catch (e) { console.warn('[Renegotiation]', e); }
+  };
+
+  pc.onconnectionstatechange = () => {
+    const s = pc.connectionState;
+    console.log(`[WebRTC] ${peerId} → ${s}`);
+    if (s === 'failed') {
+      toast('🔄 Перепідключення через relay...', 'info', 4000);
+      retryWithRelay(peerId, isInitiator);
+    } else if (s === 'disconnected' || s === 'closed') {
+      onPeerGone(peerId);
+    }
+  };
+
+  if (isInitiator) {
+    const dc = pc.createDataChannel('swacord', { ordered: true });
+    entry.dc = dc;
+    setupDataChannelNative(dc, peerId);
   }
 
-  const newPeer = new Peer(relayOptions);
-  state.peer = newPeer;
+  return entry;
+}
 
-  newPeer.on('open', newId => {
-    state.myId = newId;
-    console.log('[SwaCord] Relay peer open, id:', newId);
+async function retryWithRelay(peerId, isInitiator) {
+  const old = rtcConns.get(peerId);
+  if (old) { try { old.pc.close(); } catch {} }
+  rtcConns.delete(peerId);
 
-    const dataConn = newPeer.connect(peerId, { reliable: true, serialization: 'json' });
-    setupDataConnection(dataConn);
+  const pc = new RTCPeerConnection({ ...ICE_CONFIG, iceTransportPolicy: 'relay' });
+  const entry = { pc, dc: null, initiator: isInitiator, peerId };
+  rtcConns.set(peerId, entry);
 
-    if (state.localStream) {
-      const call = newPeer.call(peerId, state.localStream);
-      setupCall(call, peerId);
+  if (state.localStream) {
+    state.localStream.getTracks().forEach(t => pc.addTrack(t, state.localStream));
+  }
+  pc.onicecandidate = async e => { if (e.candidate) await sendSignal(peerId, 'ice', e.candidate.toJSON()); };
+  pc.ontrack = e => {
+    const stream = e.streams[0];
+    if (!stream) return;
+    if (stream.getVideoTracks().length > 0) showRemoteVideo(stream, peerId);
+    else playRemoteAudio(stream, peerId);
+  };
+  pc.ondatachannel = e => { entry.dc = e.channel; setupDataChannelNative(e.channel, peerId); };
+  pc.onconnectionstatechange = () => {
+    const s = pc.connectionState;
+    if (s === 'connected') toast('✅ Підключено через relay!', 'success', 3000);
+    else if (s === 'failed') { toast('❌ Не вдалося підключитися.', 'error', 6000); onPeerGone(peerId); }
+    else if (s === 'disconnected' || s === 'closed') onPeerGone(peerId);
+  };
+
+  if (isInitiator) {
+    const dc = pc.createDataChannel('swacord', { ordered: true });
+    entry.dc = dc;
+    setupDataChannelNative(dc, peerId);
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    await sendSignal(peerId, 'offer', offer);
+  }
+}
+
+async function connectToPeerNative(peerId) {
+  const existing = rtcConns.get(peerId);
+  if (existing?.pc.connectionState === 'connected' || existing?.pc.connectionState === 'connecting') return;
+  console.log('[WebRTC] Connecting to', peerId);
+  const entry = createRTCConnection(peerId, true);
+  const offer = await entry.pc.createOffer();
+  await entry.pc.setLocalDescription(offer);
+  await sendSignal(peerId, 'offer', offer);
+}
+
+function setupDataChannelNative(dc, peerId) {
+  const wrapper = {
+    open: dc.readyState === 'open',
+    peer: peerId,
+    send: data => { if (dc.readyState === 'open') dc.send(JSON.stringify(data)); },
+    close: () => { try { rtcConns.get(peerId)?.pc.close(); } catch {} },
+  };
+
+  dc.onopen = () => {
+    wrapper.open = true;
+    state.dataConns.set(peerId, wrapper);
+    if (!state.peers.has(peerId)) {
+      state.peers.set(peerId, { name: t('unknownUser'), avatar: '❓', micMuted: false, sharing: false });
     }
+    launchApp();
+    sendInit(wrapper);
+  };
 
-    const relayTimeout = setTimeout(() => {
-      if (dataConn.open) return;
-      toast('❌ Не вдалося підключитися. Перевірте посилання або спробуйте пізніше.', 'error', 7000);
-      DOM.overlay.classList.remove('active');
-      setTimeout(() => DOM.overlay.style.display = 'none', 400);
-    }, 20000);
+  dc.onmessage = e => {
+    try { handleDataMessage(peerId, JSON.parse(e.data)); }
+    catch (err) { console.warn('[DC] Bad message', err); }
+  };
 
-    dataConn.on('open', () => {
-      clearTimeout(relayTimeout);
-      toast('✅ Підключено через relay!', 'success', 3000);
+  dc.onclose = () => {
+    wrapper.open = false;
+    onPeerGone(peerId);
+    state.dataConns.delete(peerId);
+    rtcConns.delete(peerId);
+  };
+
+  dc.onerror = err => console.error('[DC] Error:', err);
+}
+
+function onPeerGone(peerId) {
+  if (state.peers.has(peerId)) return; // Already removed
+  const peer = state.peers.get(peerId);
+  if (peer) {
+    addSystemMessage(`${peer.avatar || ''} <strong>${escHtml(peer.name)}</strong> ${t('leftRoom')}`);
+    playSound('leave');
+  }
+  removePeer(peerId);
+  const audio = document.getElementById('audio-' + peerId);
+  if (audio) { audio.srcObject = null; audio.remove(); }
+}
+
+function startSignalPolling() {
+  if (sigPollInterval) clearInterval(sigPollInterval);
+  pollSignals();
+  sigPollInterval = setInterval(pollSignals, 1000);
+}
+
+function stopSignalPolling() {
+  if (sigPollInterval) { clearInterval(sigPollInterval); sigPollInterval = null; }
+}
+
+async function initMyPeer() {
+  state.myId = generateId();
+  console.log('[SwaCord] My ID:', state.myId);
+  startSignalPolling();
+
+  if (state.serverMode) {
+    const url = new URL(window.location.href);
+    url.searchParams.set('room', state.roomId);
+    window.history.replaceState({}, '', url.toString());
+    startVercelHeartbeat();
+    launchApp();
+  } else {
+    if (state.isHost) {
+      state.roomId = state.myId;
+      const url = new URL(window.location.href);
+      url.searchParams.set('room', state.myId);
+      window.history.replaceState({}, '', url.toString());
       launchApp();
-      sendInit(dataConn);
-    });
-
-    dataConn.on('error', err => {
-      clearTimeout(relayTimeout);
-      toast('❌ ' + t('connError') + err.message, 'error', 6000);
-      DOM.overlay.classList.remove('active');
-      setTimeout(() => DOM.overlay.style.display = 'none', 400);
-    });
-  });
-
-  newPeer.on('connection', handleIncomingData);
-  newPeer.on('call', call => handleIncomingCall(call));
-  newPeer.on('error', err => {
-    console.error('[Relay Peer Error]', err);
-    toast('❌ Relay помилка: ' + err.type, 'error', 5000);
-    DOM.overlay.classList.remove('active');
-    setTimeout(() => DOM.overlay.style.display = 'none', 400);
-  });
-}
-
-/* ══════════════════════════════════════════════════════════
-   INCOMING CONNECTIONS (HOST SIDE)
-   ══════════════════════════════════════════════════════════ */
-
-function handleIncomingCall(call) {
-  console.log('[SwaCord] Incoming call from', call.peer);
-  call.answer(state.localStream);
-  setupCall(call, call.peer);
-}
-
-function handleIncomingData(conn) {
-  console.log('[SwaCord] Incoming data conn from', conn.peer);
-  // Reject banned peers immediately
-  if (bannedPeers.has(conn.peer)) {
-    console.warn('[SwaCord] Rejected banned peer:', conn.peer);
-    conn.close();
-    return;
-  }
-  setupDataConnection(conn);
-  conn.on('open', () => sendInit(conn));
-}
-
-/* ══════════════════════════════════════════════════════════
-   DATA CONNECTION SETUP
-   ══════════════════════════════════════════════════════════ */
-function setupDataConnection(conn) {
-  state.dataConns.set(conn.peer, conn);
-
-  if (!state.peers.has(conn.peer)) {
-    state.peers.set(conn.peer, { name: t('unknownUser'), avatar: '❓', micMuted: false, sharing: false });
-  }
-
-  conn.on('data', data => handleDataMessage(conn.peer, data));
-
-  conn.on('close', () => {
-    const peer = state.peers.get(conn.peer);
-    const name = peer?.name || conn.peer;
-    addSystemMessage(`${peer?.avatar || ''} ${name} ${t('leftRoom')}`);
-    removePeer(conn.peer);
-  });
-
-  conn.on('error', err => console.error('DataConn error:', err));
-}
-
-/* ══════════════════════════════════════════════════════════
-   CALL SETUP (VOICE + VIDEO STREAM)
-   ══════════════════════════════════════════════════════════ */
-function setupCall(call, peerId) {
-  state.activeCalls.set(peerId, call);
-
-  call.on('stream', remoteStream => {
-    console.log('[SwaCord] Got remote stream from', peerId);
-    playRemoteAudio(remoteStream, peerId);
-
-    // If stream has video track → show video area
-    const videoTracks = remoteStream.getVideoTracks();
-    if (videoTracks.length > 0) {
-      showRemoteVideo(remoteStream, peerId);
+    } else {
+      DOM.connectingSub.textContent = t('connectingToHost');
+      await connectToPeerNative(state.roomId);
+      setTimeout(() => {
+        if (!state.launched) {
+          toast('❌ ' + t('hostUnavailable'), 'error', 7000);
+          DOM.overlay.classList.remove('active');
+          setTimeout(() => DOM.overlay.style.display = 'none', 400);
+        }
+      }, 30000);
     }
-
-    // Listen for track addition (dynamic screen share)
-    remoteStream.addEventListener('addtrack', () => {
-      const vt = remoteStream.getVideoTracks();
-      if (vt.length > 0) showRemoteVideo(remoteStream, peerId);
-    });
-  });
-
-  call.on('close', () => {
-    console.log('[SwaCord] Call closed from', peerId);
-    state.activeCalls.delete(peerId);
-    // Remove remote audio element
-    const el = document.getElementById('audio-' + peerId);
-    if (el) el.remove();
-  });
-
-  call.on('error', err => console.error('Call error:', err));
+  }
 }
 
 /* Play remote audio in a hidden <audio> element */
@@ -1261,10 +1179,10 @@ function playRemoteAudio(stream, peerId) {
     el = document.createElement('audio');
     el.id = 'audio-' + peerId;
     el.autoplay = true;
+    el.playsInline = true;
     el.style.display = 'none';
     document.body.appendChild(el);
   }
-  // Only set audio (filter out video for dedicated video element)
   const audioStream = new MediaStream(stream.getAudioTracks());
   el.srcObject = audioStream;
 }
@@ -1968,17 +1886,12 @@ async function startScreenShare() {
       audio: false,
     });
 
-    const videoTrack = state.screenStream.getVideoTracks()[0];
-
-    // Start a SEPARATE PeerJS call for each peer (screen only, with metadata)
-    state.dataConns.forEach((conn, peerId) => {
-      const screenCall = state.peer.call(peerId, state.screenStream, {
-        metadata: { type: 'screen' },
-      });
-      screenCall.on('stream', () => {}); // required listener
-      screenCall.on('error', err => console.warn('Screen call error:', err));
-      state.screenCalls.set(peerId, screenCall);
-    });
+    // Add screen video track to all existing WebRTC connections
+    for (const [peerId, entry] of rtcConns) {
+      if (entry.pc.connectionState === 'connected') {
+        entry._screenSender = entry.pc.addTrack(state.screenStream.getVideoTracks()[0], state.screenStream);
+      }
+    }
 
     // FIX: Host sees own screen in main video area (was black before — remoteVideo was empty)
     DOM.remoteVideo.srcObject    = state.screenStream;
@@ -2015,9 +1928,13 @@ function stopScreenShare() {
     state.screenStream = null;
   }
 
-  // Close dedicated screen MediaConnections
-  state.screenCalls.forEach(call => call.close());
-  state.screenCalls.clear();
+  // Remove screen video track from all WebRTC connections
+  for (const [peerId, entry] of rtcConns) {
+    if (entry._screenSender) {
+      try { entry.pc.removeTrack(entry._screenSender); } catch {}
+      entry._screenSender = null;
+    }
+  }
 
   DOM.localVideo.srcObject     = null;
   DOM.localVideo.style.display = '';   // restore PiP visibility
@@ -2050,7 +1967,7 @@ function showRemoteVideo(stream, peerId) {
 
 function hideRemoteVideo() {
   DOM.remoteVideo.srcObject = null;
-  if (!state.isSharingScreen && state.cameraCalls.size === 0) {
+  if (!state.isSharingScreen) {
     DOM.videoArea.style.display = 'none';
     DOM.btnPip.style.display = 'none';
   }
@@ -2392,7 +2309,7 @@ async function startVercelHeartbeat() {
       if (data.peers) {
         data.peers.forEach(pid => {
           if (pid !== state.myId && !state.peers.has(pid) && !state.dataConns.has(pid)) {
-            connectToPeer(pid);
+            connectToPeerNative(pid);
           }
         });
       }
