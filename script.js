@@ -1157,6 +1157,37 @@ function stopSignalPolling() {
   if (sigPollInterval) { clearInterval(sigPollInterval); sigPollInterval = null; }
 }
 
+/* ══════════════════════════════════════════════════════════
+   LAUNCH APP
+   Switches the UI from the connecting overlay to the main room
+   screen. Called once the local peer is ready (host / cloud room)
+   or once the first data channel to another peer opens (guest in
+   a direct P2P room). Safe to call more than once — a no-op after
+   the first successful call.
+   ══════════════════════════════════════════════════════════ */
+function launchApp() {
+  if (state.launched) return;
+  state.launched = true;
+
+  DOM.overlay.classList.remove('active');
+  setTimeout(() => { DOM.overlay.style.display = 'none'; }, 400);
+  DOM.app.style.display = 'grid';
+
+  if (DOM.roomIdDisplay) DOM.roomIdDisplay.textContent = state.roomId;
+
+  renderMyProfile();
+  addMyselfToList();
+
+  // Load whatever chat history is available for this room type.
+  // (Guests connecting into an existing cloud room get theirs here too,
+  // since state.serverMode is already known from the room ID by this point.)
+  if (state.serverMode) {
+    fetchVercelChatHistory();
+  } else {
+    loadChatHistory();
+  }
+}
+
 async function initMyPeer() {
   state.myId = generateId();
   console.log('[SwaCord] My ID:', state.myId);
@@ -1241,10 +1272,7 @@ function handleDataMessage(peerId, data) {
       });
       break;
     case MSG_TYPES.LEAVE:
-      const p = state.peers.get(peerId);
-      if (p) addSystemMessage(p.name, t('leftRoom'));
-      playSound('leave');
-      handlePeerDisconnect(peerId);
+      onPeerGone(peerId);
       break;
     case 'server_mode':
       const changed = (state.serverMode !== data.enabled);
