@@ -1097,7 +1097,11 @@ function retryWithRelay(peerId, isInitiator) {
 
 async function connectToPeerNative(peerId) {
   const existing = rtcConns.get(peerId);
-  if (existing?.pc.connectionState === 'connected' || existing?.pc.connectionState === 'connecting') return;
+  if (existing) {
+    if (existing.pc.connectionState === 'connected' || existing.pc.connectionState === 'connecting') return;
+    try { existing.pc.close(); } catch {}
+    rtcConns.delete(peerId);
+  }
   console.log('[WebRTC] Connecting to', peerId);
   createRTCConnection(peerId, true); // onnegotiationneeded fires from createDataChannel() and sends the offer
 }
@@ -2362,13 +2366,17 @@ async function startVercelHeartbeat() {
           if (pid === state.myId || state.dataConns.has(pid)) return;
           if (!peerFirstSeenAt.has(pid)) peerFirstSeenAt.set(pid, now);
 
-          const alreadyConnecting = rtcConns.has(pid);
-          const stuck = (now - peerFirstSeenAt.get(pid)) > PEER_CONNECT_FALLBACK_MS;
+          // If a connection attempt is already underway — including the
+          // internal TURN-relay retry after a failure — leave it alone.
+          // Poking it here would overwrite rtcConns mid-handshake and strand
+          // ICE candidates on a peer connection that never got an offer/answer.
+          const entry = rtcConns.get(pid);
+          const inProgress = entry && !['failed', 'closed', 'disconnected'].includes(entry.pc.connectionState);
+          if (inProgress) return;
 
-          if (!state.peers.has(pid) && !alreadyConnecting && !isPolitePeer(pid)) {
-            connectToPeerNative(pid); // normal path: impolite side initiates
-          } else if (!state.dataConns.has(pid) && stuck) {
-            connectToPeerNative(pid); // fallback: initial offer likely got lost, try ourselves
+          const stuck = (now - peerFirstSeenAt.get(pid)) > PEER_CONNECT_FALLBACK_MS;
+          if (!isPolitePeer(pid) || stuck) {
+            connectToPeerNative(pid); // impolite side initiates normally; polite side only as a stuck-connection fallback
           }
         });
         // Clean up bookkeeping for peers that left
