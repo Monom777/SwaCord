@@ -1,14 +1,7 @@
 import { Redis } from '@upstash/redis';
 
-// Redis.fromEnv() automatically uses UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN
 const redis = Redis.fromEnv();
 
-/**
- * Updates the `reactions` field of a single stored chat message in-place.
- * Chat history is a flat Redis list (room:<id>:chat, see ../chat.js), so
- * there's no direct "update by id" — we scan the list, find the message by
- * id, and overwrite that slot with lset.
- */
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Credentials', true);
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -37,7 +30,8 @@ export default async function handler(req, res) {
     let updated = false;
     for (let i = 0; i < messages.length; i++) {
       const raw = messages[i];
-      const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      let parsed;
+      try { parsed = typeof raw === 'string' ? JSON.parse(raw) : raw; } catch { parsed = null; }
       if (parsed && parsed.id === msgId) {
         parsed.reactions = reactions;
         await redis.lset(key, i, JSON.stringify(parsed));
@@ -46,9 +40,6 @@ export default async function handler(req, res) {
       }
     }
 
-    // Not finding the message (e.g. it aged out of the last-200 window) isn't
-    // an error worth failing loudly over — the reaction still worked live via
-    // the P2P data channel, it just won't show up after a reload.
     return res.status(200).json({ success: true, updated });
   } catch (error) {
     console.error('Redis API Error:', error);

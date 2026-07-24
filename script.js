@@ -1,19 +1,6 @@
-/**
- * SwaCord — script.js
- * Serverless P2P Messenger powered by Native WebRTC
- *
- * Architecture:
- *  - Signalling via /api/signal (Upstash Redis polling) — no peerjs.com!
- *  - Voice via RTCPeerConnection audio tracks (getUserMedia)
- *  - Screen share via RTCPeerConnection video track renegotiation
- *  - Text chat via RTCDataChannel
- */
 
 'use strict';
 
-/* ══════════════════════════════════════════════════════════
-   I18N — TRANSLATIONS
-   ══════════════════════════════════════════════════════════ */
 const TRANSLATIONS = {
   uk: {
     greeting:           'Привіт! Як тебе звати?',
@@ -251,9 +238,6 @@ function initLangSwitcher() {
   });
 }
 
-/* ══════════════════════════════════════════════════════════
-   THEME SWITCHER
-   ══════════════════════════════════════════════════════════ */
 function initThemeSwitcher() {
   const btn = document.getElementById('themeBtn');
   if (!btn) return;
@@ -278,9 +262,6 @@ function initThemeSwitcher() {
   });
 }
 
-/* ══════════════════════════════════════════════════════════
-   SOUND NOTIFICATIONS
-   ══════════════════════════════════════════════════════════ */
 let audioCtx = null;
 function playSound(type) {
   try {
@@ -326,9 +307,6 @@ function playSound(type) {
   }
 }
 
-/* ══════════════════════════════════════════════════════════
-   CONSTANTS & CONFIG
-   ══════════════════════════════════════════════════════════ */
 const AVATARS = [
   '😎','🦊','🐉','🌊','🌙','⚡','🔥','🌈',
   '🎮','🦄','🐺','🌸','🍕','🦋','🎭','🚀',
@@ -361,13 +339,11 @@ function persistBanned() {
   localStorage.setItem('swacord_banned', JSON.stringify([...bannedPeers]));
 }
 
-/* ══════════════════════════════════════════════════════════
-   STATE
-   ══════════════════════════════════════════════════════════ */
 const state = {
   myId:            null,
   roomId:          null,
   isHost:          false,
+  hostId:          null,
   serverMode:      false,
   launched:        false,
 
@@ -408,9 +384,6 @@ const state = {
   },
 };
 
-/* ══════════════════════════════════════════════════════════
-   DOM REFS
-   ══════════════════════════════════════════════════════════ */
 const $ = id => document.getElementById(id);
 
 const DOM = {
@@ -476,9 +449,6 @@ const DOM = {
   toastContainer:   $('toastContainer'),
 };
 
-/* ══════════════════════════════════════════════════════════
-   INIT
-   ══════════════════════════════════════════════════════════ */
 function init() {
   applyLang();
   initLangSwitcher();
@@ -590,9 +560,6 @@ function checkRoomInUrl() {
   }
 }
 
-/* ══════════════════════════════════════════════════════════
-   ONBOARDING EVENTS
-   ══════════════════════════════════════════════════════════ */
 function bindOnboardingEvents() {
   DOM.nicknameInput.addEventListener('input', () => {
     const val = DOM.nicknameInput.value.trim();
@@ -662,7 +629,7 @@ function bindOnboardingEvents() {
     }
     
     // Save screen quality
-    const qS = DOM.qualitySelect.value;
+    const qS = DOM.qualitySelect?.value ?? '';
     let width = 1280, height = 720, fps = 30;
     if (qS === '1080p60') { width = 1920; height = 1080; fps = 60; }
     else if (qS === '1080p30') { width = 1920; height = 1080; fps = 30; }
@@ -761,9 +728,6 @@ function showConnecting(title, sub) {
   DOM.connectingSub.textContent   = sub;
 }
 
-/* ══════════════════════════════════════════════════════════
-   MICROPHONE
-   ══════════════════════════════════════════════════════════ */
 async function initMedia() {
   const constraints = {
     audio: {
@@ -826,9 +790,6 @@ async function loadDevices() {
   }
 }
 
-/* ══════════════════════════════════════════════════════════
-   CAMERA SUPPORT
-   ══════════════════════════════════════════════════════════ */
 async function toggleCamera() {
   if (state.isCamOn) stopCamera();
   else await startCamera();
@@ -888,10 +849,6 @@ function stopCamera() {
 }
 
 
-/* ══════════════════════════════════════════════════════════
-   NATIVE WebRTC ENGINE — replaces PeerJS entirely
-   Signalling via /api/signal (Upstash Redis polling)
-   ══════════════════════════════════════════════════════════ */
 
 const ICE_CONFIG = {
   iceServers: [
@@ -926,13 +883,6 @@ function generateId() {
   return 'sw' + Date.now().toString(36) + Math.random().toString(36).substr(2, 8);
 }
 
-/**
- * Deterministic "politeness" for the Perfect Negotiation pattern.
- * Both sides compute this independently from the same two IDs and always
- * land on opposite answers, so exactly one side is polite and one isn't —
- * no extra signalling needed to agree on roles.
- * https://developer.mozilla.org/en-US/docs/Web/API/WebRTC_API/Perfect_negotiation
- */
 function isPolitePeer(peerId) {
   return state.myId > peerId;
 }
@@ -959,13 +909,6 @@ async function pollSignals() {
   } catch (e) { /* ignore */ }
 }
 
-/**
- * Perfect Negotiation: safely resolves the case where BOTH peers create an
- * offer for each other at the same time (glare) — which is exactly what
- * happens when two devices discover each other in the room list at once.
- * The "impolite" peer's offer always wins; the "polite" peer rolls back its
- * own offer and accepts the incoming one instead of just dropping the link.
- */
 async function handleIncomingSignal(sig) {
   const { from, type, data } = sig;
 
@@ -1045,9 +988,6 @@ function createRTCConnection(peerId, isInitiator, { relayOnly = false } = {}) {
     setupDataChannelNative(e.channel, peerId);
   };
 
-  // Any side may trigger renegotiation (e.g. adding a screen-share track),
-  // not just the original initiator — Perfect Negotiation handles the
-  // resulting collisions safely regardless of who offers.
   pc.onnegotiationneeded = async () => {
     try {
       entry.makingOffer = true;
@@ -1091,8 +1031,6 @@ function retryWithRelay(peerId, isInitiator) {
   const old = rtcConns.get(peerId);
   if (old) { try { old.pc.close(); } catch {} }
   rtcConns.delete(peerId);
-  // Re-creating with relayOnly:true forces TURN; addTrack()/createDataChannel()
-  // above will fire onnegotiationneeded automatically, which sends the offer.
   createRTCConnection(peerId, isInitiator, { relayOnly: true });
 }
 
@@ -1104,7 +1042,7 @@ async function connectToPeerNative(peerId) {
     rtcConns.delete(peerId);
   }
   console.log('[WebRTC] Connecting to', peerId);
-  createRTCConnection(peerId, true); // onnegotiationneeded fires from createDataChannel() and sends the offer
+  createRTCConnection(peerId, true);
 }
 
 function setupDataChannelNative(dc, peerId) {
@@ -1162,14 +1100,6 @@ function stopSignalPolling() {
   if (sigPollInterval) { clearInterval(sigPollInterval); sigPollInterval = null; }
 }
 
-/* ══════════════════════════════════════════════════════════
-   LAUNCH APP
-   Switches the UI from the connecting overlay to the main room
-   screen. Called once the local peer is ready (host / cloud room)
-   or once the first data channel to another peer opens (guest in
-   a direct P2P room). Safe to call more than once — a no-op after
-   the first successful call.
-   ══════════════════════════════════════════════════════════ */
 function launchApp() {
   if (state.launched) return;
   state.launched = true;
@@ -1183,9 +1113,6 @@ function launchApp() {
   renderMyProfile();
   addMyselfToList();
 
-  // Load whatever chat history is available for this room type.
-  // (Guests connecting into an existing cloud room get theirs here too,
-  // since state.serverMode is already known from the room ID by this point.)
   if (state.serverMode) {
     fetchVercelChatHistory();
   } else {
@@ -1240,9 +1167,6 @@ function playRemoteAudio(stream, peerId) {
   el.srcObject = audioStream;
 }
 
-/* ══════════════════════════════════════════════════════════
-   HANDLE INCOMING DATA MESSAGES
-   ══════════════════════════════════════════════════════════ */
 function handleDataMessage(peerId, data) {
   console.log('[SwaCord] Message from', peerId, data);
 
@@ -1280,7 +1204,7 @@ function handleDataMessage(peerId, data) {
     case MSG_TYPES.LEAVE:
       onPeerGone(peerId);
       break;
-    case 'server_mode':
+    case 'server_mode': {
       const changed = (state.serverMode !== data.enabled);
       state.serverMode = data.enabled; 
       if (changed && !state.isHost) {
@@ -1292,6 +1216,7 @@ function handleDataMessage(peerId, data) {
         }
       }
       break;
+    }
     default: console.warn('Unknown message type:', data.type);
   }
 }
@@ -1420,9 +1345,6 @@ function onScreenStateChange(peerId, data) {
   }
 }
 
-/* ══════════════════════════════════════════════════════════
-   SEND HELPERS
-   ══════════════════════════════════════════════════════════ */
 function sendInit(conn) {
   conn.send({ 
     type: MSG_TYPES.INIT, 
@@ -1444,9 +1366,6 @@ function sendToPeer(peerId, data) {
   if (conn?.open) conn.send(data);
 }
 
-/* ══════════════════════════════════════════════════════════
-   MODERATION (host actions)
-   ══════════════════════════════════════════════════════════ */
 function modKick(peerId) {
   sendToPeer(peerId, { type: MSG_TYPES.KICK });
   const conn = state.dataConns.get(peerId);
@@ -1527,9 +1446,6 @@ function onTransferHost(data) {
   }
 }
 
-/* ══════════════════════════════════════════════════════════
-   APP UI EVENTS
-   ══════════════════════════════════════════════════════════ */
 function bindAppEvents() {
   // Send message
   DOM.btnSend.addEventListener('click', sendChatMessage);
@@ -1624,9 +1540,6 @@ function bindAppEvents() {
   DOM.btnLeave.addEventListener('click', leaveRoom);
 }
 
-/* ══════════════════════════════════════════════════════════
-   CHAT
-   ══════════════════════════════════════════════════════════ */
 function sendChatMessage() {
   const text = DOM.msgInput.value.trim();
   if (!text) return;
@@ -1755,9 +1668,6 @@ function appendMessage({ id, authorId, authorName, avatar, text, time, isSelf, i
   if (!isHistory && !state.serverMode) saveMsgToHistory({ authorId, authorName, avatar, text, time, isSelf });
 }
 
-/* ══════════════════════════════════════════════════════════
-   CHAT HISTORY (localStorage)
-   ══════════════════════════════════════════════════════════ */
 const CHAT_KEY = 'swacord_chat_history';
 const CHAT_MAX = 200;
 
@@ -1842,7 +1752,6 @@ function addSystemMessage(html) {
   div.innerHTML = `<span>${html}</span>`;
   DOM.messagesWrap.appendChild(div);
   scrollToBottom();
-  // Reset grouping after system msg
   state.lastMsgAuthor = null;
   state.lastMsgTime   = null;
 }
@@ -1880,9 +1789,6 @@ function renderTypingIndicator() {
   DOM.typingIndicator.innerHTML = `<span>${text} друкує</span><span class="typing-dots"></span>`;
 }
 
-/* ══════════════════════════════════════════════════════════
-   MIC TOGGLE
-   ══════════════════════════════════════════════════════════ */
 function toggleMic() {
   state.isMicMuted = !state.isMicMuted;
 
@@ -1910,9 +1816,6 @@ function toggleMic() {
   toast(state.isMicMuted ? t('micMuted') : t('micUnmuted'), 'info');
 }
 
-/* ══════════════════════════════════════════════════════════
-   SCREEN SHARE
-   ══════════════════════════════════════════════════════════ */
 async function toggleScreenShare() {
   if (state.isSharingScreen) {
     stopScreenShare();
@@ -2026,9 +1929,6 @@ function hideRemoteVideo() {
   }
 }
 
-/* ══════════════════════════════════════════════════════════
-   MEMBER LIST
-   ══════════════════════════════════════════════════════════ */
 function addMyselfToList() {
   refreshMemberList();
 }
@@ -2067,7 +1967,7 @@ function refreshMemberList() {
       id:       peerId,
       name:     peer.name,
       avatar:   peer.avatar,
-      isHost:   peerId === state.roomId,
+      isHost:   state.hostId ? peerId === state.hostId : peerId === state.roomId,
       micMuted: peer.micMuted,
       sharing:  peer.sharing,
       isSelf:   false,
@@ -2138,9 +2038,6 @@ function renderMyProfile() {
   `;
 }
 
-/* ══════════════════════════════════════════════════════════
-   UTILITIES
-   ══════════════════════════════════════════════════════════ */
 function copyInviteLink() {
   const url = new URL(window.location.href);
   url.searchParams.set('room', state.roomId);
@@ -2227,9 +2124,6 @@ function linkify(text) {
   return text.replace(urlRe, url => `<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`);
 }
 
-/* ══════════════════════════════════════════════════════════
-   TOAST NOTIFICATIONS
-   ══════════════════════════════════════════════════════════ */
 const TOAST_ICONS = { success: '✅', error: '❌', info: 'ℹ️', default: '🔔' };
 
 function toast(message, type = 'default', duration = 3500) {
@@ -2247,9 +2141,6 @@ function toast(message, type = 'default', duration = 3500) {
   }, duration);
 }
 
-/* ══════════════════════════════════════════════════════════
-   QUALITY SETTINGS MODAL
-   ══════════════════════════════════════════════════════════ */
 const qModal   = () => document.getElementById('qualityModal');
 const qWInput  = () => document.getElementById('qWidth');
 const qHInput  = () => document.getElementById('qHeight');
@@ -2331,9 +2222,6 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 });
 
-/* ══════════════════════════════════════════════════════════
-   VERCEL MESH HEARTBEAT
-   ══════════════════════════════════════════════════════════ */
 let vercelHeartbeatInterval = null;
 const peerFirstSeenAt = new Map(); // pid -> timestamp, for the stuck-connection fallback below
 const PEER_CONNECT_FALLBACK_MS = 20000; // ~2 heartbeat cycles
@@ -2351,7 +2239,7 @@ async function startVercelHeartbeat() {
       const res = await fetch(`/api/room?room=${state.roomId}`);
       const data = await res.json();
       
-      // Update Host Status
+      state.hostId = data.host;
       if (data.host === state.myId && !state.isHost) {
         state.isHost = true;
         toast('Ви тепер хост кімнати!', 'info');
@@ -2405,7 +2293,4 @@ async function startVercelHeartbeat() {
   });
 }
 
-/* ══════════════════════════════════════════════════════════
-   BOOT
-   ══════════════════════════════════════════════════════════ */
 document.addEventListener('DOMContentLoaded', init);
