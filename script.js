@@ -917,12 +917,23 @@ const ICE_CONFIG = {
   iceCandidatePoolSize: 10,
 };
 
-// Map peerId -> { pc: RTCPeerConnection, dc: RTCDataChannel, initiator: bool }
+// Map peerId -> { pc, dc, peerId, initiator, polite, makingOffer, ignoringOffer }
 const rtcConns = new Map();
 let sigPollInterval = null;
 
 function generateId() {
   return 'sw' + Date.now().toString(36) + Math.random().toString(36).substr(2, 8);
+}
+
+/**
+ * Deterministic "politeness" for the Perfect Negotiation pattern.
+ * Both sides compute this independently from the same two IDs and always
+ * land on opposite answers, so exactly one side is polite and one isn't —
+ * no extra signalling needed to agree on roles.
+ * https://developer.mozilla.org/en-US/docs/Web/API/WebRTC_API/Perfect_negotiation
+ */
+function isPolitePeer(peerId) {
+  return state.myId > peerId;
 }
 
 async function sendSignal(to, type, data) {
@@ -947,40 +958,64 @@ async function pollSignals() {
   } catch (e) { /* ignore */ }
 }
 
+/**
+ * Perfect Negotiation: safely resolves the case where BOTH peers create an
+ * offer for each other at the same time (glare) — which is exactly what
+ * happens when two devices discover each other in the room list at once.
+ * The "impolite" peer's offer always wins; the "polite" peer rolls back its
+ * own offer and accepts the incoming one instead of just dropping the link.
+ */
 async function handleIncomingSignal(sig) {
   const { from, type, data } = sig;
-  console.log('[Signal] recv', type, 'from', from);
 
-  if (type === 'offer') {
+  if (type === 'offer' || type === 'answer') {
     let entry = rtcConns.get(from);
-    if (entry && entry.pc.connectionState !== 'connected') {
-      try { entry.pc.close(); } catch {}
-      rtcConns.delete(from);
-      entry = null;
-    }
     if (!entry) entry = createRTCConnection(from, false);
-    await entry.pc.setRemoteDescription(new RTCSessionDescription(data));
-    const answer = await entry.pc.createAnswer();
-    await entry.pc.setLocalDescription(answer);
-    await sendSignal(from, 'answer', answer);
+    const pc = entry.pc;
 
-  } else if (type === 'answer') {
-    const entry = rtcConns.get(from);
-    if (entry && entry.pc.signalingState !== 'stable') {
-      await entry.pc.setRemoteDescription(new RTCSessionDescription(data));
-    }
+    try {
+      if (type === 'offer') {
+        const offerCollision = entry.makingOffer || pc.signalingState !== 'stable';
+        entry.ignoringOffer = !entry.polite && offerCollision;
+        if (entry.ignoringOffer) return; // impolite peer: ignore the colliding offer, ours will win
+
+        if (offerCollision) {
+          // polite peer: back off our own in-flight offer, then accept theirs
+          await Promise.all([
+            pc.setLocalDescription({ type: 'rollback' }).catch(() => {}),
+            pc.setRemoteDescription(new RTCSessionDescription(data)),
+          ]);
+        } else {
+          await pc.setRemoteDescription(new RTCSessionDescription(data));
+        }
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        await sendSignal(from, 'answer', pc.localDescription);
+      } else {
+        // answer
+        await pc.setRemoteDescription(new RTCSessionDescription(data));
+      }
+    } catch (e) { console.warn('[Negotiation]', type, e); }
 
   } else if (type === 'ice') {
     const entry = rtcConns.get(from);
     if (entry && data) {
-      try { await entry.pc.addIceCandidate(new RTCIceCandidate(data)); } catch {}
+      try { await entry.pc.addIceCandidate(new RTCIceCandidate(data)); }
+      catch (e) { if (!entry.ignoringOffer) console.warn('[ICE]', e); }
     }
   }
 }
 
-function createRTCConnection(peerId, isInitiator) {
-  const pc = new RTCPeerConnection(ICE_CONFIG);
-  const entry = { pc, dc: null, initiator: isInitiator, peerId };
+function createRTCConnection(peerId, isInitiator, { relayOnly = false } = {}) {
+  const config = relayOnly ? { ...ICE_CONFIG, iceTransportPolicy: 'relay' } : ICE_CONFIG;
+  const pc = new RTCPeerConnection(config);
+  const entry = {
+    pc, dc: null, peerId,
+    initiator: isInitiator,
+    polite: isPolitePeer(peerId),
+    makingOffer: false,
+    ignoringOffer: false,
+  };
   rtcConns.set(peerId, entry);
 
   if (state.localStream) {
@@ -1009,23 +1044,36 @@ function createRTCConnection(peerId, isInitiator) {
     setupDataChannelNative(e.channel, peerId);
   };
 
+  // Any side may trigger renegotiation (e.g. adding a screen-share track),
+  // not just the original initiator — Perfect Negotiation handles the
+  // resulting collisions safely regardless of who offers.
   pc.onnegotiationneeded = async () => {
-    if (!isInitiator || pc.signalingState !== 'stable') return;
     try {
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      await sendSignal(peerId, 'offer', offer);
-    } catch (e) { console.warn('[Renegotiation]', e); }
+      entry.makingOffer = true;
+      await pc.setLocalDescription();
+      await sendSignal(peerId, 'offer', pc.localDescription);
+    } catch (e) {
+      console.warn('[Negotiation] offer failed', e);
+    } finally {
+      entry.makingOffer = false;
+    }
   };
 
   pc.onconnectionstatechange = () => {
     const s = pc.connectionState;
     console.log(`[WebRTC] ${peerId} → ${s}`);
     if (s === 'failed') {
-      toast('🔄 Перепідключення через relay...', 'info', 4000);
-      retryWithRelay(peerId, isInitiator);
+      if (!relayOnly) {
+        toast('🔄 Перепідключення через relay...', 'info', 4000);
+        retryWithRelay(peerId, isInitiator);
+      } else {
+        toast('❌ Не вдалося підключитися.', 'error', 6000);
+        onPeerGone(peerId);
+      }
     } else if (s === 'disconnected' || s === 'closed') {
       onPeerGone(peerId);
+    } else if (s === 'connected' && relayOnly) {
+      toast('✅ Підключено через relay!', 'success', 3000);
     }
   };
 
@@ -1038,51 +1086,20 @@ function createRTCConnection(peerId, isInitiator) {
   return entry;
 }
 
-async function retryWithRelay(peerId, isInitiator) {
+function retryWithRelay(peerId, isInitiator) {
   const old = rtcConns.get(peerId);
   if (old) { try { old.pc.close(); } catch {} }
   rtcConns.delete(peerId);
-
-  const pc = new RTCPeerConnection({ ...ICE_CONFIG, iceTransportPolicy: 'relay' });
-  const entry = { pc, dc: null, initiator: isInitiator, peerId };
-  rtcConns.set(peerId, entry);
-
-  if (state.localStream) {
-    state.localStream.getTracks().forEach(t => pc.addTrack(t, state.localStream));
-  }
-  pc.onicecandidate = async e => { if (e.candidate) await sendSignal(peerId, 'ice', e.candidate.toJSON()); };
-  pc.ontrack = e => {
-    const stream = e.streams[0];
-    if (!stream) return;
-    if (stream.getVideoTracks().length > 0) showRemoteVideo(stream, peerId);
-    else playRemoteAudio(stream, peerId);
-  };
-  pc.ondatachannel = e => { entry.dc = e.channel; setupDataChannelNative(e.channel, peerId); };
-  pc.onconnectionstatechange = () => {
-    const s = pc.connectionState;
-    if (s === 'connected') toast('✅ Підключено через relay!', 'success', 3000);
-    else if (s === 'failed') { toast('❌ Не вдалося підключитися.', 'error', 6000); onPeerGone(peerId); }
-    else if (s === 'disconnected' || s === 'closed') onPeerGone(peerId);
-  };
-
-  if (isInitiator) {
-    const dc = pc.createDataChannel('swacord', { ordered: true });
-    entry.dc = dc;
-    setupDataChannelNative(dc, peerId);
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    await sendSignal(peerId, 'offer', offer);
-  }
+  // Re-creating with relayOnly:true forces TURN; addTrack()/createDataChannel()
+  // above will fire onnegotiationneeded automatically, which sends the offer.
+  createRTCConnection(peerId, isInitiator, { relayOnly: true });
 }
 
 async function connectToPeerNative(peerId) {
   const existing = rtcConns.get(peerId);
   if (existing?.pc.connectionState === 'connected' || existing?.pc.connectionState === 'connecting') return;
   console.log('[WebRTC] Connecting to', peerId);
-  const entry = createRTCConnection(peerId, true);
-  const offer = await entry.pc.createOffer();
-  await entry.pc.setLocalDescription(offer);
-  await sendSignal(peerId, 'offer', offer);
+  createRTCConnection(peerId, true); // onnegotiationneeded fires from createDataChannel() and sends the offer
 }
 
 function setupDataChannelNative(dc, peerId) {
@@ -1119,7 +1136,7 @@ function setupDataChannelNative(dc, peerId) {
 }
 
 function onPeerGone(peerId) {
-  if (state.peers.has(peerId)) return; // Already removed
+  if (!state.peers.has(peerId)) return; // Already removed
   const peer = state.peers.get(peerId);
   if (peer) {
     addSystemMessage(`${peer.avatar || ''} <strong>${escHtml(peer.name)}</strong> ${t('leftRoom')}`);
@@ -2282,6 +2299,9 @@ document.addEventListener('DOMContentLoaded', () => {
    VERCEL MESH HEARTBEAT
    ══════════════════════════════════════════════════════════ */
 let vercelHeartbeatInterval = null;
+const peerFirstSeenAt = new Map(); // pid -> timestamp, for the stuck-connection fallback below
+const PEER_CONNECT_FALLBACK_MS = 20000; // ~2 heartbeat cycles
+
 async function startVercelHeartbeat() {
   const ping = async () => {
     try {
@@ -2305,13 +2325,28 @@ async function startVercelHeartbeat() {
         refreshMemberList();
       }
 
-      // Connect to any new peers
+      // Connect to any new peers. Only the deterministically "impolite" side
+      // (see isPolitePeer) initiates — otherwise both devices would create
+      // an offer AND a data channel for each other at the same instant.
       if (data.peers) {
+        const now = Date.now();
         data.peers.forEach(pid => {
-          if (pid !== state.myId && !state.peers.has(pid) && !state.dataConns.has(pid)) {
-            connectToPeerNative(pid);
+          if (pid === state.myId || state.dataConns.has(pid)) return;
+          if (!peerFirstSeenAt.has(pid)) peerFirstSeenAt.set(pid, now);
+
+          const alreadyConnecting = rtcConns.has(pid);
+          const stuck = (now - peerFirstSeenAt.get(pid)) > PEER_CONNECT_FALLBACK_MS;
+
+          if (!state.peers.has(pid) && !alreadyConnecting && !isPolitePeer(pid)) {
+            connectToPeerNative(pid); // normal path: impolite side initiates
+          } else if (!state.dataConns.has(pid) && stuck) {
+            connectToPeerNative(pid); // fallback: initial offer likely got lost, try ourselves
           }
         });
+        // Clean up bookkeeping for peers that left
+        for (const pid of peerFirstSeenAt.keys()) {
+          if (!data.peers.includes(pid)) peerFirstSeenAt.delete(pid);
+        }
       }
     } catch (e) {
       console.warn('Vercel heartbeat error:', e);
