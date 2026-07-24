@@ -408,7 +408,7 @@ const DOM = {
   myProfile:        $('myProfile'),
   connectionBadge:  $('connectionBadge'),
 
-    videoArea:        $('videoArea'),
+  videoArea:        $('videoArea'),
   videoPresenter:   $('videoPresenter'),
   remoteVideo:      $('remoteVideo'),
   localVideo:       $('localVideo'),
@@ -1718,7 +1718,9 @@ async function fetchVercelChatHistory() {
     DOM.messagesWrap.appendChild(sep);
 
     history.forEach(msg => {
-      const parsed = typeof msg === 'string' ? JSON.parse(msg) : msg;
+      let parsed;
+      try { parsed = typeof msg === 'string' ? JSON.parse(msg) : msg; } catch { return; }
+      if (!parsed) return;
       appendMessage({ ...parsed, isSelf: parsed.authorId === state.myId, isHistory: true });
     });
 
@@ -2249,29 +2251,21 @@ async function startVercelHeartbeat() {
         refreshMemberList();
       }
 
-      // Connect to any new peers. Only the deterministically "impolite" side
-      // (see isPolitePeer) initiates — otherwise both devices would create
-      // an offer AND a data channel for each other at the same instant.
       if (data.peers) {
         const now = Date.now();
         data.peers.forEach(pid => {
           if (pid === state.myId || state.dataConns.has(pid)) return;
           if (!peerFirstSeenAt.has(pid)) peerFirstSeenAt.set(pid, now);
 
-          // If a connection attempt is already underway — including the
-          // internal TURN-relay retry after a failure — leave it alone.
-          // Poking it here would overwrite rtcConns mid-handshake and strand
-          // ICE candidates on a peer connection that never got an offer/answer.
           const entry = rtcConns.get(pid);
           const inProgress = entry && !['failed', 'closed', 'disconnected'].includes(entry.pc.connectionState);
           if (inProgress) return;
 
           const stuck = (now - peerFirstSeenAt.get(pid)) > PEER_CONNECT_FALLBACK_MS;
           if (!isPolitePeer(pid) || stuck) {
-            connectToPeerNative(pid); // impolite side initiates normally; polite side only as a stuck-connection fallback
+            connectToPeerNative(pid);
           }
         });
-        // Clean up bookkeeping for peers that left
         for (const pid of peerFirstSeenAt.keys()) {
           if (!data.peers.includes(pid)) peerFirstSeenAt.delete(pid);
         }
