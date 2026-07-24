@@ -342,6 +342,7 @@ const MSG_TYPES = {
   SYSTEM:        'system',
   MIC:           'mic_state',
   SCREEN:        'screen_state',
+  STOP_SCREEN:   'stop_screen',
   // Moderation (host → peer)
   KICK:          'kick',
   BAN:           'ban',
@@ -351,10 +352,6 @@ const MSG_TYPES = {
   TYPING:        'typing',
   FILE:          'file',
 };
-
-function toggleReaction(emoji) { /* ... */ }
-function startVoiceRecord() { /* ... */ }
-function stopVoiceRecord() { /* ... */ }
 
 /* Banned peer IDs for this session */
 const bannedPeers = new Set(
@@ -456,7 +453,6 @@ const DOM = {
   controlBar:       $('controlBar'),
   roomIdDisplay:    $('roomIdDisplay'),
   btnMobileMenu:    $('btnMobileMenu'),
-  sidebar:          document.querySelector('.sidebar'),
   btnMic:           $('btnMic'),
   iconMicOn:        $('iconMicOn'),
   iconMicOff:       $('iconMicOff'),
@@ -471,6 +467,7 @@ const DOM = {
   btnCloseSettings: $('btnCloseSettings'),
   audioInputSelect: $('audioInputSelect'),
   videoInputSelect: $('videoInputSelect'),
+  qualitySelect:    $('qualitySelect'),
   btnPip:           $('btnPip'),
   btnVoice:         $('btnVoice'),
   btnExportChat:    $('btnExportChat'),
@@ -847,14 +844,13 @@ async function startCamera() {
     DOM.localVideo.srcObject = state.localVideoStream;
     DOM.localVideo.style.display = '';
 
-    state.dataConns.forEach((conn, peerId) => {
-      const call = state.peer.call(peerId, state.localVideoStream, {
-        metadata: { type: 'camera' },
-      });
-      call.on('stream', () => {});
-      call.on('error', err => console.warn('Camera call error:', err));
-      state.cameraCalls.set(peerId, call);
-    });
+    // Add camera video track to all existing WebRTC connections
+    const camTrack = state.localVideoStream.getVideoTracks()[0];
+    for (const [peerId, entry] of rtcConns) {
+      if (entry.pc.connectionState === 'connected') {
+        entry._cameraSender = entry.pc.addTrack(camTrack, state.localVideoStream);
+      }
+    }
 
     state.isCamOn = true;
     DOM.btnCamera.classList.add('active');
@@ -874,8 +870,13 @@ function stopCamera() {
     state.localVideoStream = null;
   }
   
-  state.cameraCalls.forEach(call => call.close());
-  state.cameraCalls.clear();
+  // Remove camera video track from all WebRTC connections
+  for (const [peerId, entry] of rtcConns) {
+    if (entry._cameraSender) {
+      try { entry.pc.removeTrack(entry._cameraSender); } catch {}
+      entry._cameraSender = null;
+    }
+  }
   
   DOM.localVideo.srcObject = null;
   DOM.localVideo.style.display = 'none';
@@ -1264,6 +1265,7 @@ function handleDataMessage(peerId, data) {
     case MSG_TYPES.FILE:
       playSound('msg');
       appendMessage({
+        id:        data.id,
         authorId:  peerId,
         authorName: state.peers.get(peerId)?.name || t('unknownUser'),
         avatar:    state.peers.get(peerId)?.avatar || '❓',
@@ -1535,7 +1537,6 @@ function bindAppEvents() {
     if (e.key === 'Enter') sendChatMessage();
   });
   DOM.msgInput.addEventListener('input', () => {
-    if (!state.peer || !state.peer.open || state.serverMode) return;
     broadcastData({ type: MSG_TYPES.TYPING, isTyping: true });
     if (state.typingTimeout) clearTimeout(state.typingTimeout);
     state.typingTimeout = setTimeout(() => {
@@ -1560,8 +1561,10 @@ function bindAppEvents() {
     reader.onload = () => {
       const base64 = reader.result;
       const now = Date.now();
+      const msgId = 'msg-' + now + '-' + Math.floor(Math.random()*1000);
       const msg = {
         type: MSG_TYPES.FILE,
+        id: msgId,
         fileName: file.name,
         fileType: file.type,
         data: base64,
@@ -1570,12 +1573,13 @@ function bindAppEvents() {
       broadcastData(msg);
       
       if (state.serverMode) {
-        postVercelChat({ authorId: state.myId, authorName: state.myName, avatar: state.myAvatar, isFile: true, fileName: file.name, fileType: file.type, data: base64, time: now });
+        postVercelChat({ id: msgId, authorId: state.myId, authorName: state.myName, avatar: state.myAvatar, isFile: true, fileName: file.name, fileType: file.type, data: base64, time: now });
       } else {
-        saveMsgToHistory({ authorId: state.myId, authorName: state.myName, avatar: state.myAvatar, isFile: true, fileName: file.name, fileType: file.type, data: base64, time: now, isSelf: true });
+        saveMsgToHistory({ id: msgId, authorId: state.myId, authorName: state.myName, avatar: state.myAvatar, isFile: true, fileName: file.name, fileType: file.type, data: base64, time: now, isSelf: true });
       }
       
       appendMessage({
+        id: msgId,
         authorId: state.myId,
         authorName: state.myName,
         avatar: state.myAvatar,
@@ -1646,7 +1650,7 @@ function sendChatMessage() {
   broadcastData({ type: MSG_TYPES.CHAT, id: msgId, text, time: now });
 
   if (state.serverMode) {
-    postVercelChat({ authorId: state.myId, authorName: state.myName, avatar: state.myAvatar, text, time: now });
+    postVercelChat({ id: msgId, authorId: state.myId, authorName: state.myName, avatar: state.myAvatar, text, time: now });
   } else {
     broadcastData({ type: MSG_TYPES.TYPING, isTyping: false });
   }
@@ -1738,8 +1742,8 @@ function appendMessage({ id, authorId, authorName, avatar, text, time, isSelf, i
 
   DOM.messagesWrap.appendChild(div);
   
-  if (msg.reactions) {
-    renderReactionsUI(div.querySelector('.msg-reactions'), msgId, msg.reactions);
+  if (reactions) {
+    renderReactionsUI(div.querySelector('.msg-reactions'), msgId, reactions);
   }
 
   scrollToBottom();
@@ -1959,7 +1963,7 @@ async function startScreenShare() {
     toast(`${t('screenStarted')} (${q.width}x${q.height} @ ${q.fps}fps)`, 'success');
 
     // Handle user stopping share via browser's native stop button
-    videoTrack.addEventListener('ended', () => stopScreenShare());
+    state.screenStream.getVideoTracks()[0].addEventListener('ended', () => stopScreenShare());
   } catch (err) {
     if (err.name !== 'NotAllowedError') {
       console.error('Screen share error:', err);
@@ -2187,11 +2191,11 @@ function leaveRoom() {
 }
 
 function leaveRoomSilent() {
-  state.screenCalls.forEach(call => call.close());
-  state.activeCalls.forEach(call => call.close());
   state.dataConns.forEach(conn => conn.close());
-  if (state.peer) state.peer.destroy();
+  rtcConns.forEach(entry => { try { entry.pc.close(); } catch {} });
+  rtcConns.clear();
   if (state.localStream) state.localStream.getTracks().forEach(track => track.stop());
+  if (state.localVideoStream) state.localVideoStream.getTracks().forEach(track => track.stop());
   if (state.screenStream) state.screenStream.getTracks().forEach(track => track.stop());
 
   const url = new URL(window.location.href);
